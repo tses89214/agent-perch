@@ -23,7 +23,9 @@ def load_state():
 
 def save_state(s):
     HOME.mkdir(parents=True, exist_ok=True)
-    STATE.write_text(json.dumps(s, indent=1))
+    tmp = STATE.with_suffix(".tmp")  # atomic: dashboard may read mid-write
+    tmp.write_text(json.dumps(s, indent=1))
+    tmp.replace(STATE)
 
 
 def log_event(agent, what):
@@ -66,6 +68,8 @@ def tick(agents, state, now=None):
     now = now or time.time()
     for name, spec in agents.items():
         st = state.setdefault(name, {"restarts": 0, "last_seen": None, "hash": None})
+        if st.get("stopped"):  # operator ran `stop`; don't resurrect
+            continue
         if not alive(name):
             start(name, spec)
             st["restarts"] += 1
@@ -101,7 +105,11 @@ def inbox(me):
     """Unread messages for `me` (or 'all'); per-reader cursor file."""
     cursor = HOME / f".cursor-{me}"
     seen = int(cursor.read_text()) if cursor.exists() else 0
-    lines = MAILBOX.read_text().splitlines() if MAILBOX.exists() else []
+    lines = []
+    if MAILBOX.exists():
+        with MAILBOX.open() as f:
+            fcntl.flock(f, fcntl.LOCK_SH)  # don't read a half-written line
+            lines = f.read().splitlines()
     cursor.write_text(str(len(lines)))
     msgs = [json.loads(l) for l in lines[seen:]]
     return [m for m in msgs if m["to"] in (me, "all")]
@@ -154,12 +162,14 @@ def main(argv=None):
             print(f"{r['agent']:20} {'UP' if r['up'] else 'DOWN':5} restarts={r['restarts']}")
     elif a.cmd == "tick":
         save_state(tick(agents, load_state()))
-    elif a.cmd == "start":
-        start(a.agent, agents[a.agent])
-    elif a.cmd == "stop":
-        stop(a.agent)
-    elif a.cmd == "restart":
-        stop(a.agent); start(a.agent, agents[a.agent])
+    elif a.cmd in ("start", "stop", "restart"):
+        state = load_state()
+        state.setdefault(a.agent, {"restarts": 0, "last_seen": None, "hash": None})["stopped"] = a.cmd == "stop"
+        save_state(state)
+        if a.cmd != "start":
+            stop(a.agent)
+        if a.cmd != "stop":
+            start(a.agent, agents[a.agent])
     elif a.cmd == "logs":
         print(pane(a.agent))
     elif a.cmd == "serve":

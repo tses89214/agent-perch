@@ -24,6 +24,10 @@ try:
     assert a.alive("t1") and st["t1"]["restarts"] == 1
     st = a.tick(agents, st)
     assert st["t1"]["restarts"] == 1
+    # operator stop must stick across ticks
+    a.stop("t1"); st["t1"]["stopped"] = True
+    st = a.tick(agents, st)
+    assert not a.alive("t1")
 finally:
     a.stop("t1")
 print("ok")
