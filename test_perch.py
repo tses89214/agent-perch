@@ -133,6 +133,30 @@ if shutil.which("node"):
     (a.HOME / "page.js").write_text(js)
     assert os.system(f"node --check {a.HOME / 'page.js'}") == 0
 
+# chat: refused unless the agent opted in; one line only; logged; over HTTP it also needs the token
+import threading, urllib.request, urllib.error
+agents = {"c1": {"cmd": "cat", "chat": True}, "c2": {"cmd": "cat"}}
+a.CONFIG = a.HOME / "chat.toml"
+a.CONFIG.write_text('[agents.c1]\ncmd="cat"\nchat=true\n[agents.c2]\ncmd="cat"\n')
+os.environ["PERCH_TOKEN"] = "tok"
+srv = a.HTTPServer(("127.0.0.1", 0), a.Dash); threading.Thread(target=srv.serve_forever, daemon=True).start()
+def post(path, body, token="tok"):
+    req = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}{path}", body.encode(), {"X-Token": token}, method="POST")
+    try:
+        return urllib.request.urlopen(req).status
+    except urllib.error.HTTPError as e:
+        return e.code
+try:
+    st = a.tick(agents, {}); time.sleep(0.3)
+    assert not a.send_chat("c2", agents["c2"], "nope") and "nope" not in a.pane("c2")      # not opted in
+    assert post("/send/c1", "hi\nthere", token="wrong") == 403                             # no token, no typing
+    assert post("/send/c2", "x") == 403 and post("/send/c1", "hello  from\nweb") == 200
+    time.sleep(0.4)
+    assert "hello from web" in a.pane("c1") and "chat: 'hello from web'" in a.EVENTS.read_text()
+    assert [r["chat"] for r in a.status(agents, st)["agents"]] == [True, False]
+finally:
+    srv.shutdown(); a.stop("c1"); a.stop("c2"); del os.environ["PERCH_TOKEN"]
+
 # lock: second holder is excluded while the first is inside
 import fcntl
 with a.locked():

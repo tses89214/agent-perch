@@ -253,9 +253,21 @@ def control(cmd, name, agents):
             start(name, agents[name])
 
 
+def send_chat(name, spec, text):
+    """Type one line into an agent's session, from the dashboard. Opt-in per agent (`chat = true`); returns False if refused."""
+    text = " ".join(text.split())[:2000]  # one line: a newline would submit twice and split the human's message
+    if not spec.get("chat") or not text or not alive(name):
+        return False
+    tmux("send-keys", "-t", session(name), "-l", text)
+    tmux("send-keys", "-t", session(name), "Enter")
+    log_event(name, f"chat: {text[:200]!r}")
+    return True
+
+
 def status(agents, state):
     agent_rows = [{"agent": n, "up": alive(n), "restarts": state.get(n, {}).get("restarts", 0),
-                   "last_seen": state.get(n, {}).get("last_seen"), "halted": bool(state.get(n, {}).get("stopped"))}
+                   "last_seen": state.get(n, {}).get("last_seen"), "halted": bool(state.get(n, {}).get("stopped")),
+                   "chat": bool(agents[n].get("chat"))}
                   for n in agents]
     return {"agents": agent_rows, "system": system()}
 
@@ -310,7 +322,8 @@ h1{margin:0;font-size:22px;letter-spacing:-.01em}h1 small{color:var(--mute);font
 .meta{color:var(--mute);font-size:13px;display:flex;justify-content:space-between}
 .btns{display:flex;flex-wrap:wrap;gap:6px}
 button{font:inherit;font-size:13px;color:var(--fg);background:var(--btn);border:0;border-radius:8px;padding:5px 12px;cursor:pointer}button:hover{background:var(--btn-h)}
-#logbox{margin-top:20px;display:none}#logbox h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:500}
+#logbox{margin-top:20px;display:none}#logbox h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:500;display:flex;justify-content:space-between;align-items:center}
+#chat{display:none;gap:8px;margin-top:10px}#chat input{flex:1;font:inherit;font-size:14px;color:var(--fg);background:var(--card);border:1px solid var(--line);border-radius:8px;padding:8px 12px}
 pre{margin:0;background:var(--term);color:var(--term-fg);border-radius:12px;padding:14px 16px;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;overflow:auto;max-height:55vh}
 </style>
 <main>
@@ -319,7 +332,8 @@ pre{margin:0;background:var(--term);color:var(--term-fg);border-radius:12px;padd
 <div class=card><div class=label>Memory available</div><div class=big id=mem>-</div></div>
 <div class=card><div class=label>Agents up</div><div class=big id=upcount>-</div></div></section>
 <section class=agents id=agents></section>
-<section id=logbox><h2 id=logname></h2><pre id=log></pre></section>
+<section id=logbox><h2><span id=logname></span><button id=logclose>close</button></h2><pre id=log></pre>
+<form id=chat><input id=msg placeholder="type to this agent (Enter to send)" autocomplete=off><button>send</button></form></section>
 </main>
 <script>
 let token = '';
@@ -332,11 +346,28 @@ async function act(cmd, agent) {
   if (r.status == 403) { token = ''; alert('bad token or control disabled'); }
   load();
 }
-async function logs(agent) {
-  $('logbox').style.display = 'block'; $('logname').textContent = agent;
-  $('log').textContent = await (await fetch(`logs/${encodeURIComponent(agent)}`)).text();
-  $('logbox').scrollIntoView({behavior: 'smooth'});
+let watching = null, timer = null, chatOn = false;
+async function refreshLog() {
+  if (!watching) return;
+  const pre = $('log'), atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  pre.textContent = await (await fetch(`logs/${encodeURIComponent(watching)}`)).text();
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
+function logs(agent, chat) {
+  watching = agent; chatOn = chat;
+  $('logbox').style.display = 'block'; $('logname').textContent = agent + ' (live)';
+  $('chat').style.display = chat ? 'flex' : 'none';
+  clearInterval(timer); timer = setInterval(refreshLog, 3000);
+  refreshLog().then(() => $('logbox').scrollIntoView({behavior: 'smooth'}));
+}
+$('logclose').onclick = () => { watching = null; clearInterval(timer); $('logbox').style.display = 'none'; };
+$('chat').onsubmit = async (e) => {
+  e.preventDefault();
+  const text = $('msg').value.trim(); if (!text || !watching) return;
+  if (!token) token = prompt('token') || '';
+  const r = await fetch(`send/${encodeURIComponent(watching)}`, {method: 'POST', headers: {'X-Token': token}, body: text});
+  if (r.status == 403) { token = ''; alert(await r.text()); } else { $('msg').value = ''; setTimeout(refreshLog, 800); }
+};
 async function load() {
   const j = await (await fetch('status.json')).json(), d = j.agents;
   $('disk').textContent = j.system.disk_pct + '%'; $('diskbar').style.width = j.system.disk_pct + '%';
@@ -349,7 +380,7 @@ async function load() {
     top.append(el('span', 'name', a.agent), el('span', 'pill ' + st, st));
     const meta = el('div', 'meta'); meta.append(el('span', '', a.restarts + ' restarts'), el('span', '', 'seen ' + ago(a.last_seen)));
     for (const c of ['start', 'stop', 'restart']) { const b = el('button', '', c); b.onclick = () => act(c, a.agent); btns.append(b); }
-    const lb = el('button', '', 'logs'); lb.onclick = () => logs(a.agent); btns.append(lb);
+    const lb = el('button', '', 'logs'); lb.onclick = () => logs(a.agent, a.chat); btns.append(lb);
     card.append(top, meta, btns); return card;
   }));
 }
@@ -358,8 +389,8 @@ load(); setInterval(load, 10000);
 
 
 class Dash(BaseHTTPRequestHandler):
-    """GET is read-only. POST /do/<start|stop|restart>/<agent> needs X-Token == $PERCH_TOKEN;
-    with the env var unset, control is disabled entirely."""
+    """GET is read-only. POST /do/<start|stop|restart>/<agent> and POST /send/<agent> (body = one line of text,
+    agents with `chat = true` only) need X-Token == $PERCH_TOKEN; with the env var unset, control is disabled entirely."""
 
     def reply(self, code, body, ctype="text/plain"):
         self.send_response(code)
@@ -380,8 +411,12 @@ class Dash(BaseHTTPRequestHandler):
         token = os.environ.get("PERCH_TOKEN", "")
         if not token or not hmac.compare_digest(self.headers.get("X-Token", ""), token):
             return self.reply(403, "forbidden")
-        parts = self.path.split("/")  # ['', 'do', cmd, agent]
+        parts = self.path.split("/")  # ['', 'do', cmd, agent] or ['', 'send', agent]
         agents = load_agents()
+        if len(parts) == 3 and parts[1] == "send" and unquote(parts[2]) in agents:
+            body = self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 4096)).decode(errors="replace")
+            name = unquote(parts[2])
+            return self.reply(200, "ok") if send_chat(name, agents[name], body) else self.reply(403, "chat disabled for this agent")
         if len(parts) != 4 or parts[1] != "do" or parts[2] not in ("start", "stop", "restart") or unquote(parts[3]) not in agents:
             return self.reply(404, "not found")
         control(parts[2], unquote(parts[3]), agents)

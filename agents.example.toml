@@ -12,3 +12,4 @@ stuck_markers = ["Press Enter to continue"]    # frozen = screen unchanged AND m
 # health_cmd = "pgrep -f my-mcp-child"         # nonzero exit twice in a row -> restart
 # doorbell = true                              # opt in: type a fixed "check your mailbox" line when idle + unread
 # auto_replies = [{ match = "Resume from summary?", keys = ["Enter"] }]   # known dialog -> keys, instead of restarting
+# chat = true                                  # dashboard may type one line into this agent (needs PERCH_TOKEN)
