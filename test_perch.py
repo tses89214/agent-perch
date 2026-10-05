@@ -158,8 +158,12 @@ finally:
     srv.shutdown(); a.stop("c1"); a.stop("c2"); del os.environ["PERCH_TOKEN"]
 
 # containers: only requested globs, up/down from the Status text, no docker = empty list not a crash
-fake = lambda *a, **k: type("R", (), {"stdout": "app-live\tUp 2 days\napp-old\tExited (130) 5 days ago\nother\tUp 1 hour\n"})()
+fake = lambda *a, **k: type("R", (), {"stdout": "app-live\tUp 2 days\timg:1\t127.0.0.1:80->80/tcp\napp-old\tExited (130) 5 days ago\timg:1\t\nother\tUp 1 hour\timg:2\t\n", "stderr": "err-line\n"})()
 assert [(c["name"], c["up"]) for c in a.containers(["app-*"], fake)] == [("app-live", True), ("app-old", False)]
+assert a.containers(["app-live"], fake)[0]["image"] == "img:1" and a.containers(["app-live"], fake)[0]["ports"]
+assert "err-line" in a.container_logs(["app-*"], "app-live", fake)
+assert a.container_logs(["app-*"], "other", fake) is None        # outside the configured globs: never passed to docker
+assert a.container_logs(["app-*"], "--all", fake) is None         # nor an option-looking name
 assert a.containers([], fake) == [] and a.containers(["x"], lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())) == []
 
 # logs need the token whenever one is set (panes can hold anything an agent printed)

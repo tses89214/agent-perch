@@ -141,6 +141,14 @@ def system():
     return {"disk_pct": round(du.used / du.total * 100), "mem_avail_mb": mem}
 
 
+def system_extra():
+    """Dashboard-only extras; each is best-effort (no thermal zone on a VM = omitted)."""
+    out = {"load1": os.getloadavg()[0], "uptime_h": round(float(open("/proc/uptime").read().split()[0]) / 3600)}
+    with contextlib.suppress(OSError, ValueError):
+        out["temp_c"] = round(int(open("/sys/class/thermal/thermal_zone0/temp").read()) / 1000, 1)
+    return out
+
+
 def check_system(state, fleet):
     """Alert only when a level ESCALATES, so a stuck-high disk pages once, not every tick."""
     sysm, prev = system(), state.setdefault("_system", {})
@@ -269,11 +277,20 @@ def containers(patterns, run=subprocess.run):
     if not patterns:
         return []
     try:
-        out = run(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"], capture_output=True, text=True, timeout=10).stdout
+        out = run(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}"], capture_output=True, text=True, timeout=10).stdout
     except (OSError, subprocess.TimeoutExpired):
         return []
-    rows = [l.split("\t", 1) for l in out.splitlines() if "\t" in l]
-    return [{"name": n, "status": s, "up": s.startswith("Up")} for n, s in sorted(rows) if any(fnmatch.fnmatch(n, g) for g in patterns)]
+    rows = [l.split("\t") for l in out.splitlines() if l.count("\t") == 3]
+    return [{"name": n, "status": s, "up": s.startswith("Up"), "image": i, "ports": po}
+            for n, s, i, po in sorted(rows) if any(fnmatch.fnmatch(n, g) for g in patterns)]
+
+
+def container_logs(patterns, name, run=subprocess.run):
+    """Last 200 lines of a container's logs; only for names `containers()` would list (never an arbitrary docker target)."""
+    if name not in {c["name"] for c in containers(patterns, run)}:
+        return None
+    r = run(["docker", "logs", "--tail", "200", "--timestamps", name], capture_output=True, text=True, timeout=10)
+    return r.stdout + r.stderr  # docker writes the container's stderr to ours
 
 
 def status(agents, state, fleet=None):
@@ -281,7 +298,7 @@ def status(agents, state, fleet=None):
                    "last_seen": state.get(n, {}).get("last_seen"), "halted": bool(state.get(n, {}).get("stopped")),
                    "chat": bool(agents[n].get("chat"))}
                   for n in agents]
-    return {"agents": agent_rows, "system": system(), "containers": containers((fleet or {}).get("containers"))}
+    return {"agents": agent_rows, "system": {**system(), **system_extra()}, "containers": containers((fleet or {}).get("containers"))}
 
 
 def send_msg(sender, to, message):
@@ -321,6 +338,8 @@ main{max-width:980px;margin:0 auto;padding:28px 16px 48px}
 header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:20px}
 h1{margin:0;font-size:22px;letter-spacing:-.01em}h1 small{color:var(--mute);font-weight:400;font-size:14px;margin-left:8px}
 #stamp{color:var(--mute);font-size:13px}
+nav{display:flex;gap:6px;margin-bottom:16px}nav button.on{background:var(--fg);color:var(--bg)}
+section[data-tab]{display:none}
 .sys{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:20px}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .label{color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
@@ -340,11 +359,14 @@ pre{margin:0;background:var(--term);color:var(--term-fg);border-radius:12px;padd
 </style>
 <main>
 <header><h1>agent-perch<small>supervised agents</small></h1><span id=stamp></span></header>
-<section class=sys><div class=card><div class=label>Disk used</div><div class=big id=disk>-</div><div class=bar><i id=diskbar></i></div></div>
+<nav id=tabs><button data-t=agents>Agents</button><button data-t=containers>Containers</button><button data-t=system>System</button></nav>
+<section data-tab=system class=sys><div class=card><div class=label>Disk used</div><div class=big id=disk>-</div><div class=bar><i id=diskbar></i></div></div>
 <div class=card><div class=label>Memory available</div><div class=big id=mem>-</div></div>
-<div class=card><div class=label>Agents up</div><div class=big id=upcount>-</div></div></section>
-<section class=agents id=agents></section>
-<section id=ctbox style="display:none;margin-top:20px"><div class=label style="margin-bottom:8px">Containers</div><section class=agents id=containers></section></section>
+<div class=card><div class=label>Load (1 min)</div><div class=big id=loadv>-</div></div>
+<div class=card><div class=label>Uptime</div><div class=big id=uptime>-</div></div>
+<div class=card><div class=label>CPU temp</div><div class=big id=temp>-</div></div></section>
+<section data-tab=agents><div class=card style="margin-bottom:12px"><div class=label>Agents up</div><div class=big id=upcount>-</div></div><section class=agents id=agents></section></section>
+<section data-tab=containers><section class=agents id=containers></section><div id=noct class=meta>no containers configured ([fleet] containers)</div></section>
 <section id=logbox><h2><span id=logname></span><button id=logclose>close</button></h2><pre id=log></pre>
 <form id=chat><input id=msg placeholder="type to this agent (Enter to send)" autocomplete=off><button>send</button></form></section>
 </main>
@@ -368,17 +390,25 @@ async function act(cmd, agent) {
   if (r.status == 403) alert('bad token or control disabled');
   load();
 }
-let watching = null, timer = null, chatOn = false;
+function tab(t) {
+  document.querySelectorAll('section[data-tab]').forEach((s) => s.style.display = s.dataset.tab == t ? 'block' : 'none');
+  document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.t == t));
+  try { localStorage.setItem('tab', t); } catch (e) {}
+}
+document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => tab(b.dataset.t));
+let tabInit = 'agents'; try { tabInit = localStorage.getItem('tab') || 'agents'; } catch (e) {}
+tab(tabInit);
+let watching = null, timer = null, chatOn = false, logBase = 'logs';
 async function refreshLog() {
   if (!watching) return;
   const pre = $('log'), atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-  const r = await call(`logs/${encodeURIComponent(watching)}`);
+  const r = await call(`${logBase}/${encodeURIComponent(watching)}`);
   if (r.status == 403) return $('logclose').click();
   pre.textContent = await r.text();
   if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
-function logs(agent, chat) {
-  watching = agent; chatOn = chat;
+function logs(agent, chat, base = 'logs') {
+  watching = agent; chatOn = chat; logBase = base;
   $('logbox').style.display = 'block'; $('logname').textContent = agent + ' (live)';
   $('chat').style.display = chat ? 'flex' : 'none';
   clearInterval(timer); timer = setInterval(refreshLog, 3000);
@@ -398,11 +428,16 @@ async function load() {
   $('mem').textContent = j.system.mem_avail_mb + ' MB';
   $('upcount').textContent = d.filter((a) => a.up && !a.halted).length + ' / ' + d.length;
   $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
-  $('ctbox').style.display = j.containers.length ? 'block' : 'none';
+  $('noct').style.display = j.containers.length ? 'none' : 'block';
+  $('loadv').textContent = j.system.load1.toFixed(2); $('uptime').textContent = j.system.uptime_h >= 48 ? Math.round(j.system.uptime_h / 24) + ' d' : j.system.uptime_h + ' h';
+  $('temp').textContent = j.system.temp_c === undefined ? 'n/a' : j.system.temp_c + ' °C';
   $('containers').replaceChildren(...j.containers.map((c) => {
     const card = el('div', 'card agent'), top = el('div', 'top');
     top.append(el('span', 'name', c.name), el('span', 'pill ' + (c.up ? 'UP' : 'DOWN'), c.up ? 'UP' : 'DOWN'));
-    card.append(top, el('div', 'meta', c.status)); return card;
+    const meta = el('div', 'meta'); meta.append(el('span', '', c.status), el('span', '', c.image));
+    if (c.ports) meta.append(el('span', '', c.ports));
+    const btns = el('div', 'btns'), lb = el('button', '', 'logs'); lb.onclick = () => logs(c.name, false, 'clogs'); btns.append(lb);
+    card.append(top, meta, btns); return card;
   }));
   $('agents').replaceChildren(...d.map((a) => {
     const st = a.halted ? 'HALTED' : a.up ? 'UP' : 'DOWN', card = el('div', 'card agent'), top = el('div', 'top'), btns = el('div', 'btns');
@@ -438,11 +473,14 @@ class Dash(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/status.json":
             self.reply(200, json.dumps(status(load_agents(), load_state(), load_fleet())), "application/json")
-        elif self.path.startswith("/logs/"):
+        elif self.path.startswith("/logs/") or self.path.startswith("/clogs/"):
             # a pane can hold anything the agent printed: gated whenever any auth is configured
             if (os.environ.get("PERCH_TOKEN") or os.environ.get("PERCH_TS_USER")) and not authed(self.headers):
                 return self.reply(403, "token required")
-            name = unquote(self.path[6:])
+            name = unquote(self.path.split("/", 2)[2])
+            if self.path.startswith("/clogs/"):
+                text = container_logs(load_fleet().get("containers"), name)
+                return self.reply(200, text) if text is not None else self.reply(404, "unknown container")
             self.reply(200, pane(name) if name in load_agents() and alive(name) else "(not running)")
         else:
             self.reply(200, PAGE, "text/html")

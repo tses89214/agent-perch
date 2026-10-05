@@ -56,7 +56,7 @@ Alert destinations (Telegram, Slack, mail) are whatever your `notify_cmd` does w
 
 ## Exposing the dashboard
 
-It binds 127.0.0.1 only. To reach it from other devices, put it behind something that authenticates the *network* (e.g. `tailscale serve`, which is tailnet-only with TLS). With `PERCH_TS_USER` set, requests carrying that Tailscale login skip the token (the header is only trustworthy behind `tailscale serve`; local processes can forge it, but they could read the token file anyway). `PERCH_TOKEN` is a single shared secret, enough for that, not for the public internet: don't expose it there. With the token set, logs, start/stop/restart and chat all require it; `/status.json` stays readable. Optional `[fleet] containers = ["name-glob*"]` adds a read-only docker status panel.
+It binds 127.0.0.1 only. To reach it from other devices, put it behind something that authenticates the *network* (e.g. `tailscale serve`, which is tailnet-only with TLS). With `PERCH_TS_USER` set, requests carrying that Tailscale login skip the token (the header is only trustworthy behind `tailscale serve`; local processes can forge it, but they could read the token file anyway). `PERCH_TOKEN` is a single shared secret, enough for that, not for the public internet: don't expose it there. With the token set, logs, start/stop/restart and chat all require it; `/status.json` stays readable. Optional `[fleet] containers = ["name-glob*"]` adds a read-only Containers tab (status, image, ports, last 200 log lines; only matching names ever reach `docker`). The dashboard has Agents / Containers / System tabs.
 
 ## Limits (deliberate)
 
