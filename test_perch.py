@@ -1,8 +1,8 @@
-"""Run: python3 test_agentctl.py. Needs tmux. Uses a temp HOME so nothing real is touched."""
+"""Run: python3 test_perch.py. Needs tmux. Uses a temp HOME so nothing real is touched."""
 import hashlib, os, tempfile, time
 
-os.environ["AGENT_FLEET_HOME"] = tempfile.mkdtemp()
-import agentctl as a
+os.environ["PERCH_HOME"] = tempfile.mkdtemp()
+import perch as a
 
 h = lambda t: hashlib.sha1(t.encode()).hexdigest()
 
@@ -60,7 +60,7 @@ finally:
 # crash loop: LOOP_MAX restarts in the window halts the agent and alerts; later ticks leave it alone.
 # The initial boot of a never-seen agent does not alert.
 out = a.HOME / "alerts.txt"
-fleet = {"notify_cmd": f'echo "$FLEET_MSG" >> {out}'}
+fleet = {"notify_cmd": f'echo "$PERCH_MSG" >> {out}'}
 agents = {"c1": {"cmd": "true"}}                   # exits immediately
 st = {}
 for _ in range(3):

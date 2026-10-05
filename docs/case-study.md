@@ -1,6 +1,6 @@
 # Case study: running a fleet of always-on agents on a Raspberry Pi
 
-`agent-fleet` is the generic tool. This is the environment it came from, and the parts that stayed environment-specific on purpose.
+`agent-perch` is the generic tool. This is the environment it came from, and the parts that stayed environment-specific on purpose.
 
 ## The setup
 

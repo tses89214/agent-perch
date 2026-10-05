@@ -1,5 +1,5 @@
 [fleet]                                        # all optional
-notify_cmd = "echo \"$FLEET_MSG\""             # restart / crash-loop halt / resource escalation; text arrives in $FLEET_MSG
+notify_cmd = "echo \"$PERCH_MSG\""             # restart / crash-loop halt / resource escalation; text arrives in $PERCH_MSG
 disk_warn = 80                                 # % used
 disk_crit = 90
 mem_warn_mb = 1000                             # MemAvailable below this

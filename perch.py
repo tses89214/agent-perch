@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""agentctl: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
+"""perch: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
 import argparse, contextlib, fcntl, hashlib, hmac, json, os, shutil, subprocess, sys, time, tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
 
-HOME = Path(os.environ.get("AGENT_FLEET_HOME", Path.home() / ".agent-fleet"))
+HOME = Path(os.environ.get("PERCH_HOME", Path.home() / ".perch"))
 STATE, EVENTS, MAILBOX = HOME / "state.json", HOME / "events.log", HOME / "mailbox.jsonl"
-CONFIG = Path(os.environ.get("AGENT_FLEET_CONFIG", "agents.toml"))
+CONFIG = Path(os.environ.get("PERCH_CONFIG", "agents.toml"))
 
 
 def tmux(*args):
@@ -42,19 +42,19 @@ def log_event(agent, what):
 
 
 def alert(fleet, msg):
-    """Run [fleet].notify_cmd with the text in $FLEET_MSG (env, not argv: no shell-quoting of agent output).
+    """Run [fleet].notify_cmd with the text in $PERCH_MSG (env, not argv: no shell-quoting of agent output).
     Never raises: a broken notifier must not stop supervision."""
     log_event("fleet", f"alert: {msg}")
     if "notify_cmd" not in fleet:
         return
     try:
-        subprocess.run(fleet["notify_cmd"], shell=True, timeout=15, env={**os.environ, "FLEET_MSG": msg})
+        subprocess.run(fleet["notify_cmd"], shell=True, timeout=15, env={**os.environ, "PERCH_MSG": msg})
     except Exception as e:
         log_event("fleet", f"notify failed: {e}")
 
 
 def session(name):
-    return f"fleet_{name}"
+    return f"perch_{name}"
 
 
 def alive(name):
@@ -105,15 +105,15 @@ def bump(name, st, now, why, fleet):
     log_event(name, f"restarted: {why}")
     if len(st["recent"]) >= LOOP_MAX:
         stop(name)
-        st["stopped"] = True  # same flag as an operator stop: only `agentctl start` clears it
-        alert(fleet, f"{name}: {LOOP_MAX} restarts in {LOOP_WINDOW // 60} min ({why}), halted. Fix it, then `agentctl start {name}`")
+        st["stopped"] = True  # same flag as an operator stop: only `perch start` clears it
+        alert(fleet, f"{name}: {LOOP_MAX} restarts in {LOOP_WINDOW // 60} min ({why}), halted. Fix it, then `perch start {name}`")
     elif not first:
         alert(fleet, f"{name} restarted: {why}")
 
 
 def ring_doorbell(name):
     """Type ONE fixed line into the agent's session. Content never travels this way."""
-    cmd = f"Mailbox has new messages. Run: AGENT_FLEET_HOME={HOME} python3 {Path(__file__).resolve()} inbox {name}"
+    cmd = f"Mailbox has new messages. Run: PERCH_HOME={HOME} python3 {Path(__file__).resolve()} inbox {name}"
     tmux("send-keys", "-t", session(name), "-l", cmd)
     tmux("send-keys", "-t", session(name), "Enter")
     log_event(name, "doorbell")
@@ -246,8 +246,8 @@ def inbox(me):
     return msgs
 
 
-PAGE = """<!doctype html><meta charset=utf-8><title>agent-fleet</title>
-<body style="font:14px monospace;margin:2rem"><h3>agent-fleet</h3><p id=sys></p><table id=t border=1 cellpadding=4></table><pre id=log></pre>
+PAGE = """<!doctype html><meta charset=utf-8><title>agent-perch</title>
+<body style="font:14px monospace;margin:2rem"><h3>agent-perch</h3><p id=sys></p><table id=t border=1 cellpadding=4></table><pre id=log></pre>
 <script>
 let token = '';
 async function act(cmd, agent) {
@@ -279,7 +279,7 @@ load(); setInterval(load, 10000);
 
 
 class Dash(BaseHTTPRequestHandler):
-    """GET is read-only. POST /do/<start|stop|restart>/<agent> needs X-Token == $AGENT_FLEET_TOKEN;
+    """GET is read-only. POST /do/<start|stop|restart>/<agent> needs X-Token == $PERCH_TOKEN;
     with the env var unset, control is disabled entirely."""
 
     def reply(self, code, body, ctype="text/plain"):
@@ -298,7 +298,7 @@ class Dash(BaseHTTPRequestHandler):
             self.reply(200, PAGE, "text/html")
 
     def do_POST(self):
-        token = os.environ.get("AGENT_FLEET_TOKEN", "")
+        token = os.environ.get("PERCH_TOKEN", "")
         if not token or not hmac.compare_digest(self.headers.get("X-Token", ""), token):
             return self.reply(403, "forbidden")
         parts = self.path.split("/")  # ['', 'do', cmd, agent]
@@ -313,7 +313,7 @@ class Dash(BaseHTTPRequestHandler):
 
 
 def main(argv=None):
-    p = argparse.ArgumentParser(prog="agentctl")
+    p = argparse.ArgumentParser(prog="perch")
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("ls")
     sub.add_parser("tick")
