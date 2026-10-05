@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """perch: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
-import argparse, contextlib, fcntl, hashlib, hmac, json, os, shutil, subprocess, sys, time, tomllib
+import argparse, contextlib, fcntl, hashlib, hmac, json, os, re, shutil, subprocess, sys, time, tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -8,6 +8,7 @@ from urllib.parse import unquote
 HOME = Path(os.environ.get("PERCH_HOME", Path.home() / ".perch"))
 STATE, EVENTS, MAILBOX = HOME / "state.json", HOME / "events.log", HOME / "mailbox.jsonl"
 CONFIG = Path(os.environ.get("PERCH_CONFIG", "agents.toml"))
+PREFIX = os.environ.get("PERCH_PREFIX", "perch_")  # tmux session = PREFIX + agent; set it to adopt sessions that already exist
 
 
 def tmux(*args):
@@ -54,7 +55,7 @@ def alert(fleet, msg):
 
 
 def session(name):
-    return f"perch_{name}"
+    return PREFIX + name
 
 
 def alive(name):
@@ -75,23 +76,31 @@ def stop(name):
     log_event(name, "stopped")
 
 
-def is_stuck(prev_hash, text, markers):
-    """Frozen = screen identical to last tick AND a known stuck marker on it.
-    Idle prompt never matches a marker; a working agent's screen changes."""
+def tail(text, n=10):
+    """Markers are matched on the last n lines only: a resolved error stays in scrollback and must not trigger."""
+    return "\n".join(text.rstrip().splitlines()[-n:])  # capture-pane pads the pane with blank lines
+
+
+def is_stuck(prev_hash, text, markers, idle_markers=()):
+    """Frozen = screen identical to last tick AND a known stuck marker in its tail, unless an idle marker
+    (prompt footer: the turn already ended) is there too. A working agent's screen changes."""
     same = prev_hash == hashlib.sha1(text.encode()).hexdigest()
-    return same and any(m in text for m in markers)
+    t = tail(text)
+    return same and any(m in t for m in markers) and not any(m in t for m in idle_markers)
 
 
 HEALTH_FAILS = 2  # consecutive failures before restart: a fresh start needs a tick or two to come up
 LOOP_MAX, LOOP_WINDOW = 3, 600  # restarts allowed per window before we give up on an agent
 
 
-def healthy(spec):
+def healthy(name, spec):
+    """health_cmd gets $PERCH_SESSION (tmux session) so it can inspect the agent's process tree."""
     if "health_cmd" not in spec:
         return True
     try:
         return subprocess.run(spec["health_cmd"], shell=True, timeout=10, capture_output=True,
-                              cwd=os.path.expanduser(spec.get("cwd", "~"))).returncode == 0
+                              cwd=os.path.expanduser(spec.get("cwd", "~")),
+                              env={**os.environ, "PERCH_SESSION": session(name)}).returncode == 0
     except subprocess.TimeoutExpired:
         return False
 
@@ -143,6 +152,33 @@ def check_system(state, fleet):
     prev.update(lv)
 
 
+def check_probe(state, fleet, run=subprocess.run):
+    """[fleet].probe_cmd: infra no single agent owns (proxy, DNS, port forward). Alert on down/up transitions only."""
+    if "probe_cmd" not in fleet:
+        return
+    try:
+        ok = run(fleet["probe_cmd"], shell=True, timeout=15, capture_output=True).returncode == 0
+    except subprocess.TimeoutExpired:
+        ok = False
+    prev = state.setdefault("_probe", {})
+    if not ok and not prev.get("down"):
+        alert(fleet, f"probe failed: {fleet['probe_cmd']}")
+    elif ok and prev.get("down"):
+        alert(fleet, "probe recovered")
+    prev["down"] = not ok
+
+
+def notice(name, st, spec, text, fleet):
+    """Per-agent `notice_regex`: alert once per distinct matching line, touch nothing (observe only)."""
+    if "notice_regex" not in spec:
+        return
+    hits = [l.strip() for l in text.splitlines() if re.search(spec["notice_regex"], l, re.I)]
+    line = hits[-1] if hits else None
+    if line and line != st.get("notice"):
+        alert(fleet, f"{name}: {line}")
+    st["notice"] = line
+
+
 def auto_reply(name, spec, text):
     """Answer a known harness dialog (match -> keys). Returns True if a rule fired."""
     for rule in spec.get("auto_replies", []):
@@ -165,13 +201,18 @@ def tick(agents, state, now=None, fleet=None):
             bump(name, st, now, "not running", fleet)
             continue
         text = pane(name)
+        notice(name, st, spec, text, fleet)
         if auto_reply(name, spec, text):
             continue  # a dialog is not a freeze; answer it, judge next tick
-        if is_stuck(st["hash"], text, spec.get("stuck_markers", [])):
+        if any(m in tail(text) for m in spec.get("restart_markers", [])):  # prompt nobody can answer: no need to wait a tick
+            stop(name); start(name, spec)
+            bump(name, st, now, "unanswerable prompt", fleet)
+            continue
+        if is_stuck(st["hash"], text, spec.get("stuck_markers", []), spec.get("idle_markers", [])):
             stop(name); start(name, spec)
             bump(name, st, now, "stuck", fleet)
             continue
-        st["health_fails"] = 0 if healthy(spec) else st.get("health_fails", 0) + 1
+        st["health_fails"] = 0 if healthy(name, spec) else st.get("health_fails", 0) + 1
         if st["health_fails"] >= HEALTH_FAILS:
             stop(name); start(name, spec)
             bump(name, st, now, "health_cmd failed", fleet)
@@ -185,6 +226,7 @@ def tick(agents, state, now=None, fleet=None):
                 ring_doorbell(name)
                 st["rung"] = total
     check_system(state, fleet)
+    check_probe(state, fleet)
     return state
 
 

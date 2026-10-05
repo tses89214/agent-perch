@@ -11,6 +11,11 @@ assert a.is_stuck(h("Press Enter"), "Press Enter", ["Press Enter"])
 assert not a.is_stuck(h("old"), "Press Enter", ["Press Enter"])      # screen changed = working
 assert not a.is_stuck(h("$ "), "$ ", ["Press Enter"])                # idle, no marker
 
+# idle marker suppresses a stuck marker (turn already ended); old scrollback beyond the tail is ignored
+assert not a.is_stuck(h("err\nbypass on"), "err\nbypass on", ["err"], ["bypass on"])
+old = "err\n" + "\n".join("x" * 1 for _ in range(12))
+assert not a.is_stuck(h(old), old, ["err"])
+
 # send/inbox: addressed + broadcast delivered once, others' mail skipped
 a.send_msg("x", "bob", "hi"); a.send_msg("x", "all", "yo"); a.send_msg("x", "carol", "no")
 assert [m["message"] for m in a.inbox("bob")] == ["hi", "yo"]
@@ -95,6 +100,29 @@ try:
     assert "got-y" in a.pane("r1"), a.pane("r1")
 finally:
     a.stop("r1")
+
+# restart_markers: restart at once (no unchanged-screen wait); notice_regex: alert once per distinct line, no action
+out.unlink()
+agents = {"m1": {"cmd": "sh -c 'echo Enter to select; echo you hit the limit; sleep 60'",
+                 "restart_markers": ["Enter to select"], "notice_regex": "hit.*limit"}}
+try:
+    st = a.tick(agents, {}, fleet=fleet); time.sleep(0.4)
+    st = a.tick(agents, st, fleet=fleet)               # menu visible -> restarted on first sighting
+    assert st["m1"]["restarts"] == 2, st
+    alerts = out.read_text().splitlines()
+    assert sum("hit the limit" in l for l in alerts) == 1 and any("unanswerable" in l for l in alerts), alerts
+    time.sleep(0.4); st = a.tick(agents, st, fleet=fleet)
+    assert sum("hit the limit" in l for l in out.read_text().splitlines()) == 1
+finally:
+    a.stop("m1")
+
+# probe: alert on transitions only; health_cmd sees $PERCH_SESSION
+out.unlink()
+pst = {}
+for cmd in ("false", "false", "true", "true"):
+    a.check_probe(pst, {**fleet, "probe_cmd": cmd})
+assert [l.split()[0] for l in out.read_text().splitlines()] == ["probe", "probe"], out.read_text()
+assert a.healthy("x", {"health_cmd": f'test "$PERCH_SESSION" = {a.session("x")}'})
 
 # lock: second holder is excluded while the first is inside
 import fcntl
