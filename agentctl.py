@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """agentctl: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
-import argparse, contextlib, fcntl, hashlib, hmac, json, os, subprocess, sys, time, tomllib
+import argparse, contextlib, fcntl, hashlib, hmac, json, os, shutil, subprocess, sys, time, tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -18,6 +18,10 @@ def load_agents():
     return tomllib.loads(CONFIG.read_text())["agents"]
 
 
+def load_fleet():
+    return tomllib.loads(CONFIG.read_text()).get("fleet", {})
+
+
 def load_state():
     return json.loads(STATE.read_text()) if STATE.exists() else {}
 
@@ -31,8 +35,22 @@ def save_state(s):
 
 def log_event(agent, what):
     HOME.mkdir(parents=True, exist_ok=True)
+    if EVENTS.exists() and EVENTS.stat().st_size > 1_000_000:
+        EVENTS.replace(EVENTS.with_suffix(".log.1"))  # keep one old file: bounded disk, recent history
     with EVENTS.open("a") as f:
         f.write(f"{time.strftime('%FT%T')} {agent} {what}\n")
+
+
+def alert(fleet, msg):
+    """Run [fleet].notify_cmd with the text in $FLEET_MSG (env, not argv: no shell-quoting of agent output).
+    Never raises: a broken notifier must not stop supervision."""
+    log_event("fleet", f"alert: {msg}")
+    if "notify_cmd" not in fleet:
+        return
+    try:
+        subprocess.run(fleet["notify_cmd"], shell=True, timeout=15, env={**os.environ, "FLEET_MSG": msg})
+    except Exception as e:
+        log_event("fleet", f"notify failed: {e}")
 
 
 def session(name):
@@ -65,6 +83,7 @@ def is_stuck(prev_hash, text, markers):
 
 
 HEALTH_FAILS = 2  # consecutive failures before restart: a fresh start needs a tick or two to come up
+LOOP_MAX, LOOP_WINDOW = 3, 600  # restarts allowed per window before we give up on an agent
 
 
 def healthy(spec):
@@ -77,12 +96,19 @@ def healthy(spec):
         return False
 
 
-def restart(name, spec, st, why):
-    stop(name)
-    start(name, spec)
-    log_event(name, f"restarted: {why}")
+def bump(name, st, now, why, fleet):
+    """Record a restart; halt the agent if it is crash-looping."""
+    first = st["restarts"] == 0 and why == "not running"  # initial boot of a never-seen agent: not news
     st["restarts"] += 1
     st["hash"], st["health_fails"] = None, 0
+    st["recent"] = [t for t in st.get("recent", []) if now - t < LOOP_WINDOW] + [now]
+    log_event(name, f"restarted: {why}")
+    if len(st["recent"]) >= LOOP_MAX:
+        stop(name)
+        st["stopped"] = True  # same flag as an operator stop: only `agentctl start` clears it
+        alert(fleet, f"{name}: {LOOP_MAX} restarts in {LOOP_WINDOW // 60} min ({why}), halted. Fix it, then `agentctl start {name}`")
+    elif not first:
+        alert(fleet, f"{name} restarted: {why}")
 
 
 def ring_doorbell(name):
@@ -93,25 +119,62 @@ def ring_doorbell(name):
     log_event(name, "doorbell")
 
 
-def tick(agents, state, now=None):
+def level(value, warn, crit, high_is_bad=True):
+    """0 ok / 1 warn / 2 crit."""
+    v = value if high_is_bad else -value
+    w, c = (warn, crit) if high_is_bad else (-warn, -crit)
+    return 2 if v >= c else 1 if v >= w else 0
+
+
+def system():
+    du = shutil.disk_usage("/")
+    mem = next(int(l.split()[1]) // 1024 for l in open("/proc/meminfo") if l.startswith("MemAvailable"))
+    return {"disk_pct": round(du.used / du.total * 100), "mem_avail_mb": mem}
+
+
+def check_system(state, fleet):
+    """Alert only when a level ESCALATES, so a stuck-high disk pages once, not every tick."""
+    sysm, prev = system(), state.setdefault("_system", {})
+    lv = {"disk": level(sysm["disk_pct"], fleet.get("disk_warn", 80), fleet.get("disk_crit", 90)),
+          "mem": level(sysm["mem_avail_mb"], fleet.get("mem_warn_mb", 1000), fleet.get("mem_crit_mb", 400), False)}
+    for k, v in lv.items():
+        if v > prev.get(k, 0):
+            alert(fleet, f"{k} {'critical' if v == 2 else 'warning'}: {sysm}")
+    prev.update(lv)
+
+
+def auto_reply(name, spec, text):
+    """Answer a known harness dialog (match -> keys). Returns True if a rule fired."""
+    for rule in spec.get("auto_replies", []):
+        if rule["match"] in text:
+            tmux("send-keys", "-t", session(name), *rule["keys"])
+            log_event(name, f"auto_reply: {rule['match']!r}")
+            return True
+    return False
+
+
+def tick(agents, state, now=None, fleet=None):
     """One supervision pass (run from cron). Returns updated state."""
-    now = now or time.time()
+    now, fleet = now or time.time(), fleet or {}
     for name, spec in agents.items():
         st = state.setdefault(name, {"restarts": 0, "last_seen": None, "hash": None})
-        if st.get("stopped"):  # operator ran `stop`; don't resurrect
+        if st.get("stopped"):  # operator stop or crash-loop halt; don't resurrect
             continue
         if not alive(name):
             start(name, spec)
-            st["restarts"] += 1
-            st["hash"] = None
+            bump(name, st, now, "not running", fleet)
             continue
         text = pane(name)
+        if auto_reply(name, spec, text):
+            continue  # a dialog is not a freeze; answer it, judge next tick
         if is_stuck(st["hash"], text, spec.get("stuck_markers", [])):
-            restart(name, spec, st, "stuck")
+            stop(name); start(name, spec)
+            bump(name, st, now, "stuck", fleet)
             continue
         st["health_fails"] = 0 if healthy(spec) else st.get("health_fails", 0) + 1
         if st["health_fails"] >= HEALTH_FAILS:
-            restart(name, spec, st, "health_cmd failed")
+            stop(name); start(name, spec)
+            bump(name, st, now, "health_cmd failed", fleet)
             continue
         new_hash = hashlib.sha1(text.encode()).hexdigest()
         idle = st["hash"] == new_hash  # screen static since last tick: not mid-turn
@@ -121,6 +184,7 @@ def tick(agents, state, now=None):
             if unread and st.get("rung") != total:  # once per new batch, not every tick
                 ring_doorbell(name)
                 st["rung"] = total
+    check_system(state, fleet)
     return state
 
 
@@ -137,7 +201,9 @@ def control(cmd, name, agents):
     """start/stop/restart; `stopped` flag keeps tick from resurrecting an operator stop."""
     with locked():
         state = load_state()
-        state.setdefault(name, {"restarts": 0, "last_seen": None, "hash": None})["stopped"] = cmd == "stop"
+        st = state.setdefault(name, {"restarts": 0, "last_seen": None, "hash": None})
+        st["stopped"] = cmd == "stop"
+        st["recent"] = []  # operator took over: fresh crash-loop budget
         save_state(state)
         if cmd != "start":
             stop(name)
@@ -146,8 +212,10 @@ def control(cmd, name, agents):
 
 
 def status(agents, state):
-    return [{"agent": n, "up": alive(n), "restarts": state.get(n, {}).get("restarts", 0),
-             "last_seen": state.get(n, {}).get("last_seen")} for n in agents]
+    agent_rows = [{"agent": n, "up": alive(n), "restarts": state.get(n, {}).get("restarts", 0),
+                   "last_seen": state.get(n, {}).get("last_seen"), "halted": bool(state.get(n, {}).get("stopped"))}
+                  for n in agents]
+    return {"agents": agent_rows, "system": system()}
 
 
 def send_msg(sender, to, message):
@@ -179,7 +247,7 @@ def inbox(me):
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>agent-fleet</title>
-<body style="font:14px monospace;margin:2rem"><h3>agent-fleet</h3><table id=t border=1 cellpadding=4></table><pre id=log></pre>
+<body style="font:14px monospace;margin:2rem"><h3>agent-fleet</h3><p id=sys></p><table id=t border=1 cellpadding=4></table><pre id=log></pre>
 <script>
 let token = '';
 async function act(cmd, agent) {
@@ -192,7 +260,8 @@ async function logs(agent) {
   log.textContent = await (await fetch(`logs/${encodeURIComponent(agent)}`)).text();
 }
 async function load() {
-  const d = await (await fetch('status.json')).json();
+  const j = await (await fetch('status.json')).json(), d = j.agents;
+  sys.textContent = `disk ${j.system.disk_pct}%  mem available ${j.system.mem_avail_mb} MB`;
   t.replaceChildren();
   const row = (cells) => { const tr = t.insertRow(); cells.forEach(c => tr.insertCell().append(c)); return tr; };
   row(['agent', 'up', 'restarts', 'last seen', 'control']);
@@ -202,7 +271,7 @@ async function load() {
       const b = document.createElement('button'); b.textContent = c; b.onclick = () => act(c, a.agent); btns.append(b);
     }
     const lb = document.createElement('button'); lb.textContent = 'logs'; lb.onclick = () => logs(a.agent); btns.append(lb);
-    row([a.agent, a.up ? 'UP' : 'DOWN', String(a.restarts), a.last_seen ? new Date(a.last_seen * 1000).toLocaleString() : '-', btns]);
+    row([a.agent, a.halted ? 'HALTED' : a.up ? 'UP' : 'DOWN', String(a.restarts), a.last_seen ? new Date(a.last_seen * 1000).toLocaleString() : '-', btns]);
   }
 }
 load(); setInterval(load, 10000);
@@ -265,11 +334,13 @@ def main(argv=None):
     if a.cmd in ("start", "stop", "restart", "logs") and a.agent not in agents:
         sys.exit(f"unknown agent: {a.agent}")
     if a.cmd == "ls":
-        for r in status(agents, load_state()):
-            print(f"{r['agent']:20} {'UP' if r['up'] else 'DOWN':5} restarts={r['restarts']}")
+        st = status(agents, load_state())
+        for r in st["agents"]:
+            print(f"{r['agent']:20} {'HALTED' if r['halted'] else 'UP' if r['up'] else 'DOWN':7} restarts={r['restarts']}")
+        print(f"system: {st['system']}")
     elif a.cmd == "tick":
         with locked():
-            save_state(tick(agents, load_state()))
+            save_state(tick(agents, load_state(), fleet=load_fleet()))
     elif a.cmd in ("start", "stop", "restart"):
         control(a.cmd, a.agent, agents)
     elif a.cmd == "logs":

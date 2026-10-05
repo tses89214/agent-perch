@@ -1,6 +1,14 @@
+[fleet]                                        # all optional
+notify_cmd = "echo \"$FLEET_MSG\""             # restart / crash-loop halt / resource escalation; text arrives in $FLEET_MSG
+disk_warn = 80                                 # % used
+disk_crit = 90
+mem_warn_mb = 1000                             # MemAvailable below this
+mem_crit_mb = 400
+
 [agents.demo]
 cmd = "sh -c 'while true; do date; sleep 5; done'"
 cwd = "~"
-stuck_markers = ["Press Enter to continue"]   # frozen = screen unchanged AND marker visible
-# health_cmd = "pgrep -f my-mcp-child"        # nonzero exit twice in a row -> restart
-# doorbell = true                             # opt in: type a fixed "check your mailbox" line when idle + unread
+stuck_markers = ["Press Enter to continue"]    # frozen = screen unchanged AND marker visible
+# health_cmd = "pgrep -f my-mcp-child"         # nonzero exit twice in a row -> restart
+# doorbell = true                              # opt in: type a fixed "check your mailbox" line when idle + unread
+# auto_replies = [{ match = "Resume from summary?", keys = ["Enter"] }]   # known dialog -> keys, instead of restarting
