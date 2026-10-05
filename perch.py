@@ -353,18 +353,27 @@ let token = '';
 const $ = (id) => document.getElementById(id);
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
 const ago = (ts) => { if (!ts) return 'never'; const s = Math.max(0, Date.now() / 1000 - ts); return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago'; };
+// try first without a token (tailnet identity may already authorise us); ask only after a 403
+async function call(url, opts = {}) {
+  let r = await fetch(url, {...opts, headers: {'X-Token': token}});
+  if (r.status == 403) {
+    token = prompt('token') || '';
+    if (token) r = await fetch(url, {...opts, headers: {'X-Token': token}});
+    if (r.status == 403) token = '';
+  }
+  return r;
+}
 async function act(cmd, agent) {
-  if (!token) token = prompt('token') || '';
-  const r = await fetch(`do/${cmd}/${encodeURIComponent(agent)}`, {method: 'POST', headers: {'X-Token': token}});
-  if (r.status == 403) { token = ''; alert('bad token or control disabled'); }
+  const r = await call(`do/${cmd}/${encodeURIComponent(agent)}`, {method: 'POST'});
+  if (r.status == 403) alert('bad token or control disabled');
   load();
 }
 let watching = null, timer = null, chatOn = false;
 async function refreshLog() {
   if (!watching) return;
   const pre = $('log'), atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-  const r = await fetch(`logs/${encodeURIComponent(watching)}`, {headers: {'X-Token': token}});
-  if (r.status == 403) { token = prompt('token') || ''; if (!token) return $('logclose').click(); return refreshLog(); }
+  const r = await call(`logs/${encodeURIComponent(watching)}`);
+  if (r.status == 403) return $('logclose').click();
   pre.textContent = await r.text();
   if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
@@ -379,9 +388,8 @@ $('logclose').onclick = () => { watching = null; clearInterval(timer); $('logbox
 $('chat').onsubmit = async (e) => {
   e.preventDefault();
   const text = $('msg').value.trim(); if (!text || !watching) return;
-  if (!token) token = prompt('token') || '';
-  const r = await fetch(`send/${encodeURIComponent(watching)}`, {method: 'POST', headers: {'X-Token': token}, body: text});
-  if (r.status == 403) { token = ''; alert(await r.text()); } else { $('msg').value = ''; setTimeout(refreshLog, 800); }
+  const r = await call(`send/${encodeURIComponent(watching)}`, {method: 'POST', body: text});
+  if (r.status == 403) alert(await r.text()); else { $('msg').value = ''; setTimeout(refreshLog, 800); }
 };
 async function load() {
   const j = await (await fetch('status.json')).json(), d = j.agents;
@@ -409,6 +417,14 @@ load(); setInterval(load, 10000);
 </script>"""
 
 
+def authed(headers):
+    """Token match, or (when $PERCH_TS_USER is set) the login `tailscale serve` stamps on tailnet requests."""
+    token, ts_user = os.environ.get("PERCH_TOKEN", ""), os.environ.get("PERCH_TS_USER", "")
+    if ts_user and headers.get("Tailscale-User-Login", "") == ts_user:  # ponytail: header is forgeable by local processes; they could read the token file anyway
+        return True
+    return bool(token) and hmac.compare_digest(headers.get("X-Token", ""), token)
+
+
 class Dash(BaseHTTPRequestHandler):
     """GET is read-only (except /logs/<agent>, which needs the token when one is set). POST /do/<start|stop|restart>/<agent> and POST /send/<agent> (body = one line of text,
     agents with `chat = true` only) need X-Token == $PERCH_TOKEN; with the env var unset, control is disabled entirely."""
@@ -423,8 +439,8 @@ class Dash(BaseHTTPRequestHandler):
         if self.path == "/status.json":
             self.reply(200, json.dumps(status(load_agents(), load_state(), load_fleet())), "application/json")
         elif self.path.startswith("/logs/"):
-            token = os.environ.get("PERCH_TOKEN", "")  # a pane can hold anything the agent printed: token-gated whenever control is on
-            if token and not hmac.compare_digest(self.headers.get("X-Token", ""), token):
+            # a pane can hold anything the agent printed: gated whenever any auth is configured
+            if (os.environ.get("PERCH_TOKEN") or os.environ.get("PERCH_TS_USER")) and not authed(self.headers):
                 return self.reply(403, "token required")
             name = unquote(self.path[6:])
             self.reply(200, pane(name) if name in load_agents() and alive(name) else "(not running)")
@@ -432,8 +448,7 @@ class Dash(BaseHTTPRequestHandler):
             self.reply(200, PAGE, "text/html")
 
     def do_POST(self):
-        token = os.environ.get("PERCH_TOKEN", "")
-        if not token or not hmac.compare_digest(self.headers.get("X-Token", ""), token):
+        if not authed(self.headers):
             return self.reply(403, "forbidden")
         parts = self.path.split("/")  # ['', 'do', cmd, agent] or ['', 'send', agent]
         agents = load_agents()

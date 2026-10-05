@@ -179,6 +179,15 @@ try:
 finally:
     srv.shutdown()
 
+# tailnet identity: right login passes with no token, wrong/absent login does not, token still works
+os.environ["PERCH_TOKEN"] = "tok"; os.environ["PERCH_TS_USER"] = "me@x"
+assert a.authed({"Tailscale-User-Login": "me@x"}) and a.authed({"X-Token": "tok"})
+assert not a.authed({"Tailscale-User-Login": "you@x"}) and not a.authed({})
+del os.environ["PERCH_TOKEN"]
+assert a.authed({"Tailscale-User-Login": "me@x"}) and not a.authed({"X-Token": "tok"})
+del os.environ["PERCH_TS_USER"]
+assert not a.authed({"Tailscale-User-Login": "me@x"})   # feature is off unless configured
+
 # lock: second holder is excluded while the first is inside
 import fcntl
 with a.locked():
