@@ -267,7 +267,7 @@ def send_chat(name, spec, text):
     text = " ".join(text.split())[:2000]  # one line: a newline would submit twice and split the human's message
     if not spec.get("chat") or not text or not alive(name):
         return False
-    tmux("send-keys", "-t", session(name), "-l", text)
+    tmux("send-keys", "-t", session(name), "-l", "--", text)  # "--": text starting with "-" must not parse as a tmux option
     tmux("send-keys", "-t", session(name), "Enter")
     log_event(name, f"chat: {text[:200]!r}")
     return True
@@ -312,7 +312,10 @@ def container_logs(patterns, name, run=subprocess.run):
     """Last 200 lines of a container's logs; only for names `containers()` would list (never an arbitrary docker target)."""
     if name not in {c["name"] for c in containers(patterns, run)}:
         return None
-    r = run(["docker", "logs", "--tail", "200", "--timestamps", name], capture_output=True, text=True, timeout=10)
+    try:
+        r = run(["docker", "logs", "--tail", "200", "--timestamps", name], capture_output=True, text=True, timeout=10)
+    except subprocess.TimeoutExpired:
+        return "(docker logs timed out)"
     return r.stdout + r.stderr  # docker writes the container's stderr to ours
 
 
@@ -525,7 +528,7 @@ class Dash(BaseHTTPRequestHandler):
         parts = self.path.split("/")  # ['', 'do', cmd, agent] or ['', 'send', agent]
         agents = load_agents()
         if len(parts) == 3 and parts[1] == "send" and unquote(parts[2]) in agents:
-            body = self.rfile.read(min(int(self.headers.get("Content-Length", 0)), 4096)).decode(errors="replace")
+            body = self.rfile.read(min(int(self.headers.get("Content-Length") or 0), 4096)).decode(errors="replace")
             name = unquote(parts[2])
             return self.reply(200, "ok") if send_chat(name, agents[name], body) else self.reply(403, "chat disabled for this agent")
         if len(parts) != 4 or parts[1] != "do" or parts[2] not in ("start", "stop", "restart") or unquote(parts[3]) not in agents:

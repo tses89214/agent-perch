@@ -152,6 +152,8 @@ try:
     assert post("/send/c1", "hi\nthere", token="wrong") == 403                             # no token, no typing
     assert post("/send/c2", "x") == 403 and post("/send/c1", "hello  from\nweb") == 200
     time.sleep(0.4)
+    assert a.send_chat("c1", agents["c1"], "-n --help") ; time.sleep(0.4)      # leading dash is text, not a tmux flag
+    assert "-n --help" in a.pane("c1")
     assert "hello from web" in a.pane("c1") and "chat: 'hello from web'" in a.EVENTS.read_text()
     assert [r["chat"] for r in a.status(agents, st)["agents"]] == [True, False]
 finally:
@@ -164,6 +166,10 @@ assert a.containers(["app-live"], fake)[0]["image"] == "img:1" and a.containers(
 assert "err-line" in a.container_logs(["app-*"], "app-live", fake)
 assert a.container_logs(["app-*"], "other", fake) is None        # outside the configured globs: never passed to docker
 assert a.container_logs(["app-*"], "--all", fake) is None         # nor an option-looking name
+def slow(*x, **k):
+    if x[0][1] == "logs": raise a.subprocess.TimeoutExpired("docker", 10)
+    return fake()
+assert "timed out" in a.container_logs(["app-*"], "app-live", slow)   # hung docker must not 500 the dashboard
 assert a.containers([], fake) == [] and a.containers(["x"], lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())) == []
 
 # logs need the token whenever one is set (panes can hold anything an agent printed)
