@@ -124,6 +124,15 @@ for cmd in ("false", "false", "true", "true"):
 assert [l.split()[0] for l in out.read_text().splitlines()] == ["probe", "probe"], out.read_text()
 assert a.healthy("x", {"health_cmd": f'test "$PERCH_SESSION" = {a.session("x")}'})
 
+# dashboard page: every element id the script touches exists, and the script parses (a typo here = blank dashboard)
+import re, shutil
+ids = set(re.findall(r"\$\('(\w+)'\)", a.PAGE))
+assert ids and all(f"id={i}" in a.PAGE for i in ids), ids - set(re.findall(r"id=(\w+)", a.PAGE))
+js = re.search(r"<script>(.*)</script>", a.PAGE, re.S).group(1)
+if shutil.which("node"):
+    (a.HOME / "page.js").write_text(js)
+    assert os.system(f"node --check {a.HOME / 'page.js'}") == 0
+
 # lock: second holder is excluded while the first is inside
 import fcntl
 with a.locked():

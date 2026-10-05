@@ -19,6 +19,21 @@ PERCH_TOKEN=secret python3 perch.py serve --port 8080  # dashboard; without the 
 python3 test_perch.py               # needs tmux
 ```
 
+![dashboard](docs/dashboard.png)
+
+## Configure
+
+Nothing machine-specific is baked in. Agents, markers and alert commands live in your own `agents.toml` (git-ignored; copy `agents.example.toml`). Everything else is an environment variable:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `PERCH_CONFIG` | `agents.toml` | path to your agent declarations |
+| `PERCH_HOME` | `~/.perch` | state, events log, mailbox |
+| `PERCH_PREFIX` | `perch_` | tmux session name = prefix + agent (set it to adopt sessions that already exist) |
+| `PERCH_TOKEN` | unset | dashboard control token; unset = read-only |
+
+Alert destinations (Telegram, Slack, mail) are whatever your `notify_cmd` does with `$PERCH_MSG`; keep its credentials in your own scripts, not in the config.
+
 ## Design decisions
 
 - **Frozen = unchanged screen AND a known marker.** Either signal alone misfires: an idle agent at a prompt has an unchanged screen; a working agent shows a marker-like word mid-output. Both together means a keypress prompt nobody will answer. An idle agent is only at risk if its unchanged screen also contains a marker, so pick markers specific to the stuck prompt. Cost: markers are per-agent config you must know up front.

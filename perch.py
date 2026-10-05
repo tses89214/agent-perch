@@ -288,10 +288,44 @@ def inbox(me):
     return msgs
 
 
-PAGE = """<!doctype html><meta charset=utf-8><title>agent-perch</title>
-<body style="font:14px monospace;margin:2rem"><h3>agent-perch</h3><p id=sys></p><table id=t border=1 cellpadding=4></table><pre id=log></pre>
+PAGE = """<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>agent-perch</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--fg:#1c2330;--mute:#6b7586;--line:#e3e6eb;--up:#1a9d5c;--down:#d6403a;--halt:#c98a0b;--btn:#eef0f4;--btn-h:#e0e4ea;--term:#0f141b;--term-fg:#c9d4e3}
+@media(prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#171c24;--fg:#e6ebf2;--mute:#8693a6;--line:#262d38;--up:#3dcf85;--down:#ff6b64;--halt:#e6b04a;--btn:#222a35;--btn-h:#2d3745}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:980px;margin:0 auto;padding:28px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:8px;margin-bottom:20px}
+h1{margin:0;font-size:22px;letter-spacing:-.01em}h1 small{color:var(--mute);font-weight:400;font-size:14px;margin-left:8px}
+#stamp{color:var(--mute);font-size:13px}
+.sys{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+.label{color:var(--mute);font-size:12px;text-transform:uppercase;letter-spacing:.06em}
+.big{font-size:22px;font-weight:600;margin-top:2px}
+.bar{height:6px;border-radius:3px;background:var(--line);margin-top:8px;overflow:hidden}.bar i{display:block;height:100%;background:var(--up);border-radius:3px}
+.agents{display:grid;grid-template-columns:repeat(auto-fill,minmax(290px,1fr));gap:12px}
+.agent{display:flex;flex-direction:column;gap:10px}
+.top{display:flex;align-items:center;justify-content:space-between;gap:8px}.name{font-weight:600;word-break:break-all}
+.pill{font-size:12px;font-weight:600;padding:2px 10px;border-radius:999px;color:#fff;white-space:nowrap}
+.UP{background:var(--up)}.DOWN{background:var(--down)}.HALTED{background:var(--halt)}
+.meta{color:var(--mute);font-size:13px;display:flex;justify-content:space-between}
+.btns{display:flex;flex-wrap:wrap;gap:6px}
+button{font:inherit;font-size:13px;color:var(--fg);background:var(--btn);border:0;border-radius:8px;padding:5px 12px;cursor:pointer}button:hover{background:var(--btn-h)}
+#logbox{margin-top:20px;display:none}#logbox h2{font-size:14px;margin:0 0 8px;color:var(--mute);font-weight:500}
+pre{margin:0;background:var(--term);color:var(--term-fg);border-radius:12px;padding:14px 16px;font:12.5px/1.45 ui-monospace,Menlo,Consolas,monospace;overflow:auto;max-height:55vh}
+</style>
+<main>
+<header><h1>agent-perch<small>supervised agents</small></h1><span id=stamp></span></header>
+<section class=sys><div class=card><div class=label>Disk used</div><div class=big id=disk>-</div><div class=bar><i id=diskbar></i></div></div>
+<div class=card><div class=label>Memory available</div><div class=big id=mem>-</div></div>
+<div class=card><div class=label>Agents up</div><div class=big id=upcount>-</div></div></section>
+<section class=agents id=agents></section>
+<section id=logbox><h2 id=logname></h2><pre id=log></pre></section>
+</main>
 <script>
 let token = '';
+const $ = (id) => document.getElementById(id);
+const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text !== undefined) e.textContent = text; return e; };
+const ago = (ts) => { if (!ts) return 'never'; const s = Math.max(0, Date.now() / 1000 - ts); return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : Math.round(s / 86400) + ' d ago'; };
 async function act(cmd, agent) {
   if (!token) token = prompt('token') || '';
   const r = await fetch(`do/${cmd}/${encodeURIComponent(agent)}`, {method: 'POST', headers: {'X-Token': token}});
@@ -299,22 +333,25 @@ async function act(cmd, agent) {
   load();
 }
 async function logs(agent) {
-  log.textContent = await (await fetch(`logs/${encodeURIComponent(agent)}`)).text();
+  $('logbox').style.display = 'block'; $('logname').textContent = agent;
+  $('log').textContent = await (await fetch(`logs/${encodeURIComponent(agent)}`)).text();
+  $('logbox').scrollIntoView({behavior: 'smooth'});
 }
 async function load() {
   const j = await (await fetch('status.json')).json(), d = j.agents;
-  sys.textContent = `disk ${j.system.disk_pct}%  mem available ${j.system.mem_avail_mb} MB`;
-  t.replaceChildren();
-  const row = (cells) => { const tr = t.insertRow(); cells.forEach(c => tr.insertCell().append(c)); return tr; };
-  row(['agent', 'up', 'restarts', 'last seen', 'control']);
-  for (const a of d) {
-    const btns = document.createElement('span');
-    for (const c of ['start', 'stop', 'restart']) {
-      const b = document.createElement('button'); b.textContent = c; b.onclick = () => act(c, a.agent); btns.append(b);
-    }
-    const lb = document.createElement('button'); lb.textContent = 'logs'; lb.onclick = () => logs(a.agent); btns.append(lb);
-    row([a.agent, a.halted ? 'HALTED' : a.up ? 'UP' : 'DOWN', String(a.restarts), a.last_seen ? new Date(a.last_seen * 1000).toLocaleString() : '-', btns]);
-  }
+  $('disk').textContent = j.system.disk_pct + '%'; $('diskbar').style.width = j.system.disk_pct + '%';
+  $('diskbar').style.background = j.system.disk_pct >= 90 ? 'var(--down)' : j.system.disk_pct >= 80 ? 'var(--halt)' : 'var(--up)';
+  $('mem').textContent = j.system.mem_avail_mb + ' MB';
+  $('upcount').textContent = d.filter((a) => a.up && !a.halted).length + ' / ' + d.length;
+  $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  $('agents').replaceChildren(...d.map((a) => {
+    const st = a.halted ? 'HALTED' : a.up ? 'UP' : 'DOWN', card = el('div', 'card agent'), top = el('div', 'top'), btns = el('div', 'btns');
+    top.append(el('span', 'name', a.agent), el('span', 'pill ' + st, st));
+    const meta = el('div', 'meta'); meta.append(el('span', '', a.restarts + ' restarts'), el('span', '', 'seen ' + ago(a.last_seen)));
+    for (const c of ['start', 'stop', 'restart']) { const b = el('button', '', c); b.onclick = () => act(c, a.agent); btns.append(b); }
+    const lb = el('button', '', 'logs'); lb.onclick = () => logs(a.agent); btns.append(lb);
+    card.append(top, meta, btns); return card;
+  }));
 }
 load(); setInterval(load, 10000);
 </script>"""
