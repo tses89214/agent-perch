@@ -1,0 +1,4 @@
+[agents.demo]
+cmd = "sh -c 'while true; do date; sleep 5; done'"
+cwd = "~"
+stuck_markers = ["Press Enter to continue"]
