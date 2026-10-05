@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """perch: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
-import argparse, contextlib, fcntl, hashlib, hmac, json, os, re, shutil, subprocess, sys, time, tomllib
+import argparse, contextlib, fcntl, fnmatch, hashlib, hmac, json, os, re, shutil, subprocess, sys, time, tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -264,12 +264,24 @@ def send_chat(name, spec, text):
     return True
 
 
-def status(agents, state):
+def containers(patterns, run=subprocess.run):
+    """Read-only docker status for `[fleet].containers` name globs. Missing docker = empty, never an error."""
+    if not patterns:
+        return []
+    try:
+        out = run(["docker", "ps", "-a", "--format", "{{.Names}}\t{{.Status}}"], capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    rows = [l.split("\t", 1) for l in out.splitlines() if "\t" in l]
+    return [{"name": n, "status": s, "up": s.startswith("Up")} for n, s in sorted(rows) if any(fnmatch.fnmatch(n, g) for g in patterns)]
+
+
+def status(agents, state, fleet=None):
     agent_rows = [{"agent": n, "up": alive(n), "restarts": state.get(n, {}).get("restarts", 0),
                    "last_seen": state.get(n, {}).get("last_seen"), "halted": bool(state.get(n, {}).get("stopped")),
                    "chat": bool(agents[n].get("chat"))}
                   for n in agents]
-    return {"agents": agent_rows, "system": system()}
+    return {"agents": agent_rows, "system": system(), "containers": containers((fleet or {}).get("containers"))}
 
 
 def send_msg(sender, to, message):
@@ -332,6 +344,7 @@ pre{margin:0;background:var(--term);color:var(--term-fg);border-radius:12px;padd
 <div class=card><div class=label>Memory available</div><div class=big id=mem>-</div></div>
 <div class=card><div class=label>Agents up</div><div class=big id=upcount>-</div></div></section>
 <section class=agents id=agents></section>
+<section id=ctbox style="display:none;margin-top:20px"><div class=label style="margin-bottom:8px">Containers</div><section class=agents id=containers></section></section>
 <section id=logbox><h2><span id=logname></span><button id=logclose>close</button></h2><pre id=log></pre>
 <form id=chat><input id=msg placeholder="type to this agent (Enter to send)" autocomplete=off><button>send</button></form></section>
 </main>
@@ -350,7 +363,9 @@ let watching = null, timer = null, chatOn = false;
 async function refreshLog() {
   if (!watching) return;
   const pre = $('log'), atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
-  pre.textContent = await (await fetch(`logs/${encodeURIComponent(watching)}`)).text();
+  const r = await fetch(`logs/${encodeURIComponent(watching)}`, {headers: {'X-Token': token}});
+  if (r.status == 403) { token = prompt('token') || ''; if (!token) return $('logclose').click(); return refreshLog(); }
+  pre.textContent = await r.text();
   if (atEnd) pre.scrollTop = pre.scrollHeight;
 }
 function logs(agent, chat) {
@@ -375,6 +390,12 @@ async function load() {
   $('mem').textContent = j.system.mem_avail_mb + ' MB';
   $('upcount').textContent = d.filter((a) => a.up && !a.halted).length + ' / ' + d.length;
   $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  $('ctbox').style.display = j.containers.length ? 'block' : 'none';
+  $('containers').replaceChildren(...j.containers.map((c) => {
+    const card = el('div', 'card agent'), top = el('div', 'top');
+    top.append(el('span', 'name', c.name), el('span', 'pill ' + (c.up ? 'UP' : 'DOWN'), c.up ? 'UP' : 'DOWN'));
+    card.append(top, el('div', 'meta', c.status)); return card;
+  }));
   $('agents').replaceChildren(...d.map((a) => {
     const st = a.halted ? 'HALTED' : a.up ? 'UP' : 'DOWN', card = el('div', 'card agent'), top = el('div', 'top'), btns = el('div', 'btns');
     top.append(el('span', 'name', a.agent), el('span', 'pill ' + st, st));
@@ -389,7 +410,7 @@ load(); setInterval(load, 10000);
 
 
 class Dash(BaseHTTPRequestHandler):
-    """GET is read-only. POST /do/<start|stop|restart>/<agent> and POST /send/<agent> (body = one line of text,
+    """GET is read-only (except /logs/<agent>, which needs the token when one is set). POST /do/<start|stop|restart>/<agent> and POST /send/<agent> (body = one line of text,
     agents with `chat = true` only) need X-Token == $PERCH_TOKEN; with the env var unset, control is disabled entirely."""
 
     def reply(self, code, body, ctype="text/plain"):
@@ -400,8 +421,11 @@ class Dash(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/status.json":
-            self.reply(200, json.dumps(status(load_agents(), load_state())), "application/json")
+            self.reply(200, json.dumps(status(load_agents(), load_state(), load_fleet())), "application/json")
         elif self.path.startswith("/logs/"):
+            token = os.environ.get("PERCH_TOKEN", "")  # a pane can hold anything the agent printed: token-gated whenever control is on
+            if token and not hmac.compare_digest(self.headers.get("X-Token", ""), token):
+                return self.reply(403, "token required")
             name = unquote(self.path[6:])
             self.reply(200, pane(name) if name in load_agents() and alive(name) else "(not running)")
         else:

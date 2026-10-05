@@ -157,6 +157,28 @@ try:
 finally:
     srv.shutdown(); a.stop("c1"); a.stop("c2"); del os.environ["PERCH_TOKEN"]
 
+# containers: only requested globs, up/down from the Status text, no docker = empty list not a crash
+fake = lambda *a, **k: type("R", (), {"stdout": "app-live\tUp 2 days\napp-old\tExited (130) 5 days ago\nother\tUp 1 hour\n"})()
+assert [(c["name"], c["up"]) for c in a.containers(["app-*"], fake)] == [("app-live", True), ("app-old", False)]
+assert a.containers([], fake) == [] and a.containers(["x"], lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError())) == []
+
+# logs need the token whenever one is set (panes can hold anything an agent printed)
+os.environ["PERCH_TOKEN"] = "tok"
+srv = a.HTTPServer(("127.0.0.1", 0), a.Dash); threading.Thread(target=srv.serve_forever, daemon=True).start()
+def get(path, token=None):
+    req = urllib.request.Request(f"http://127.0.0.1:{srv.server_port}{path}", headers={"X-Token": token} if token else {})
+    try:
+        return urllib.request.urlopen(req).status
+    except urllib.error.HTTPError as e:
+        return e.code
+try:
+    assert get("/logs/c1") == 403 and get("/logs/c1", "wrong") == 403 and get("/logs/c1", "tok") == 200
+    assert get("/status.json") == 200                       # status stays readable without a token
+    del os.environ["PERCH_TOKEN"]
+    assert get("/logs/c1") == 200                            # no token configured = local-only default stays open
+finally:
+    srv.shutdown()
+
 # lock: second holder is excluded while the first is inside
 import fcntl
 with a.locked():

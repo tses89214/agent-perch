@@ -53,6 +53,10 @@ Alert destinations (Telegram, Slack, mail) are whatever your `notify_cmd` does w
 - **Live logs and dashboard chat.** The logs panel re-fetches every 3 s while open. Typing into an agent from the dashboard (`chat = true`, off by default, per agent) goes through the same token as start/stop, is one line only, and is written to `events.log`. This is a human at a keyboard, the web equivalent of attaching to the tmux session; it is not an agent-to-agent channel (that stays the mailbox). Cost: anyone holding the token can type into every opted-in agent, so only opt in agents where that is acceptable.
 - **Dashboard control is off unless `PERCH_TOKEN` is set, and binds localhost.** Start/stop/restart/logs buttons; POSTs need the token (constant-time compare), unknown agents 404. Plain HTTP, so use a TLS reverse proxy for remote access; token is a shared secret, not per-user auth.
 
+## Exposing the dashboard
+
+It binds 127.0.0.1 only. To reach it from other devices, put it behind something that authenticates the *network* (e.g. `tailscale serve`, which is tailnet-only with TLS). `PERCH_TOKEN` is a single shared secret, enough for that, not for the public internet: don't expose it there. With the token set, logs, start/stop/restart and chat all require it; `/status.json` stays readable. Optional `[fleet] containers = ["name-glob*"]` adds a read-only docker status panel.
+
 ## Limits (deliberate)
 
 Single machine, single tenant. No per-agent CPU/memory limits (cgroups/ulimit would be the next step). No auth, no secrets management, no isolation between agents (they share a Unix user). Hosting agents for other people would need all three; that is roadmap, not built.
@@ -60,3 +64,7 @@ Single machine, single tenant. No per-agent CPU/memory limits (cgroups/ulimit wo
 ## Origin
 
 Generalised from a live Raspberry Pi fleet watchdog. The Pi-specific parts (webhook ingress, nginx routing, backups, reboot diagnostics) are written up in [docs/case-study.md](docs/case-study.md) instead of built into the tool.
+
+## License
+
+MIT
