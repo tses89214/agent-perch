@@ -1,0 +1,7 @@
+[Unit]
+Description=agent-perch supervision tick
+
+[Service]
+Type=oneshot
+Environment=PERCH_CONFIG=%h/perch/agents.toml
+ExecStart=/usr/bin/python3 %h/perch/perch.py tick

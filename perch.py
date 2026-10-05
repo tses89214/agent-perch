@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """perch: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
-import argparse, contextlib, fcntl, fnmatch, hashlib, hmac, json, os, re, shutil, subprocess, sys, time, tomllib
+import argparse, contextlib, fcntl, fnmatch, glob, hashlib, hmac, json, os, re, shutil, subprocess, sys, time, tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -235,6 +235,7 @@ def tick(agents, state, now=None, fleet=None):
                 st["rung"] = total
     check_system(state, fleet)
     check_probe(state, fleet)
+    check_containers(state, fleet)
     return state
 
 
@@ -285,6 +286,28 @@ def containers(patterns, run=subprocess.run):
             for n, s, i, po in sorted(rows) if any(fnmatch.fnmatch(n, g) for g in patterns)]
 
 
+def check_containers(state, fleet, run=subprocess.run):
+    """Alert once when a listed container goes Up -> not Up. Observe only: never restarts (these may be live-trading)."""
+    prev = state.setdefault("_containers", {})
+    watch = fleet.get("containers_alert", fleet.get("containers"))  # alert on a subset (e.g. live ones; dry-runs are stopped on purpose)
+    for c in containers(watch, run):
+        if prev.get(c["name"]) and not c["up"]:
+            alert(fleet, f"container down: {c['name']} ({c['status']})")
+        prev[c["name"]] = c["up"]
+
+
+def cron_logs(patterns, now=None, limit=200):
+    """Age of the newest write to each log matching `[fleet].cron_logs` globs, stalest first: a job that silently stopped shows up on top."""
+    now = now or time.time()
+    files = {f for g in patterns or [] for f in glob.glob(os.path.expanduser(g))}
+    rows = [{"name": "/".join(Path(f).parts[-2:]), "age_s": int(now - os.stat(f).st_mtime)} for f in files if os.path.isfile(f)]
+    return sorted(rows, key=lambda r: -r["age_s"])[:limit]
+
+
+def recent_events(n=100):
+    return EVENTS.read_text().splitlines()[-n:] if EVENTS.exists() else []
+
+
 def container_logs(patterns, name, run=subprocess.run):
     """Last 200 lines of a container's logs; only for names `containers()` would list (never an arbitrary docker target)."""
     if name not in {c["name"] for c in containers(patterns, run)}:
@@ -298,7 +321,8 @@ def status(agents, state, fleet=None):
                    "last_seen": state.get(n, {}).get("last_seen"), "halted": bool(state.get(n, {}).get("stopped")),
                    "chat": bool(agents[n].get("chat"))}
                   for n in agents]
-    return {"agents": agent_rows, "system": {**system(), **system_extra()}, "containers": containers((fleet or {}).get("containers"))}
+    return {"agents": agent_rows, "system": {**system(), **system_extra()}, "containers": containers((fleet or {}).get("containers")),
+            "cron_logs": cron_logs((fleet or {}).get("cron_logs"))}
 
 
 def send_msg(sender, to, message):
@@ -359,12 +383,14 @@ pre{margin:0;background:var(--term);color:var(--term-fg);border-radius:12px;padd
 </style>
 <main>
 <header><h1>agent-perch<small>supervised agents</small></h1><span id=stamp></span></header>
-<nav id=tabs><button data-t=agents>Agents</button><button data-t=containers>Containers</button><button data-t=system>System</button></nav>
-<section data-tab=system class=sys><div class=card><div class=label>Disk used</div><div class=big id=disk>-</div><div class=bar><i id=diskbar></i></div></div>
+<nav id=tabs><button data-t=agents>Agents</button><button data-t=containers>Containers</button><button data-t=events>Events</button><button data-t=system>System</button></nav>
+<section data-tab=events><pre id=events>-</pre></section>
+<section data-tab=system><div class=sys style="margin-bottom:16px"><div class=card><div class=label>Disk used</div><div class=big id=disk>-</div><div class=bar><i id=diskbar></i></div></div>
 <div class=card><div class=label>Memory available</div><div class=big id=mem>-</div></div>
 <div class=card><div class=label>Load (1 min)</div><div class=big id=loadv>-</div></div>
 <div class=card><div class=label>Uptime</div><div class=big id=uptime>-</div></div>
-<div class=card><div class=label>CPU temp</div><div class=big id=temp>-</div></div></section>
+<div class=card><div class=label>CPU temp</div><div class=big id=temp>-</div></div></div>
+<div class=label style="margin-bottom:8px" id=cronlabel>Job logs (stalest first)</div><div class=card id=cronlogs style="max-height:50vh;overflow:auto"></div></section>
 <section data-tab=agents><div class=card style="margin-bottom:12px"><div class=label>Agents up</div><div class=big id=upcount>-</div></div><section class=agents id=agents></section></section>
 <section data-tab=containers><section class=agents id=containers></section><div id=noct class=meta>no containers configured ([fleet] containers)</div></section>
 <section id=logbox><h2><span id=logname></span><button id=logclose>close</button></h2><pre id=log></pre>
@@ -390,7 +416,11 @@ async function act(cmd, agent) {
   if (r.status == 403) alert('bad token or control disabled');
   load();
 }
+async function loadEvents() {
+  const r = await call('events'); if (r.status == 200) $('events').textContent = await r.text();
+}
 function tab(t) {
+  if (t == 'events') loadEvents();
   document.querySelectorAll('section[data-tab]').forEach((s) => s.style.display = s.dataset.tab == t ? 'block' : 'none');
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.t == t));
   try { localStorage.setItem('tab', t); } catch (e) {}
@@ -428,6 +458,8 @@ async function load() {
   $('mem').textContent = j.system.mem_avail_mb + ' MB';
   $('upcount').textContent = d.filter((a) => a.up && !a.halted).length + ' / ' + d.length;
   $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  $('cronlabel').style.display = $('cronlogs').style.display = j.cron_logs.length ? 'block' : 'none';
+  $('cronlogs').replaceChildren(...j.cron_logs.map((c) => { const row = el('div', 'meta'); row.append(el('span', '', c.name), el('span', '', ago(Date.now() / 1000 - c.age_s))); return row; }));
   $('noct').style.display = j.containers.length ? 'none' : 'block';
   $('loadv').textContent = j.system.load1.toFixed(2); $('uptime').textContent = j.system.uptime_h >= 48 ? Math.round(j.system.uptime_h / 24) + ' d' : j.system.uptime_h + ' h';
   $('temp').textContent = j.system.temp_c === undefined ? 'n/a' : j.system.temp_c + ' °C';
@@ -473,10 +505,12 @@ class Dash(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/status.json":
             self.reply(200, json.dumps(status(load_agents(), load_state(), load_fleet())), "application/json")
-        elif self.path.startswith("/logs/") or self.path.startswith("/clogs/"):
+        elif self.path.startswith(("/logs/", "/clogs/", "/events")):
             # a pane can hold anything the agent printed: gated whenever any auth is configured
             if (os.environ.get("PERCH_TOKEN") or os.environ.get("PERCH_TS_USER")) and not authed(self.headers):
                 return self.reply(403, "token required")
+            if self.path == "/events":
+                return self.reply(200, "\n".join(reversed(recent_events())) or "(no events)")
             name = unquote(self.path.split("/", 2)[2])
             if self.path.startswith("/clogs/"):
                 text = container_logs(load_fleet().get("containers"), name)
@@ -503,6 +537,21 @@ class Dash(BaseHTTPRequestHandler):
         pass
 
 
+def init():
+    """First-run helper: write a starter config next to where PERCH_CONFIG points, then print the cron line."""
+    example = Path(__file__).with_name("agents.example.toml")
+    if CONFIG.exists():
+        print(f"{CONFIG} already exists, left alone")
+    elif example.exists():
+        CONFIG.write_text(example.read_text())
+        print(f"wrote {CONFIG} (edit it: replace the demo agent with yours)")
+    else:
+        sys.exit("agents.example.toml not found next to perch.py; copy it from the repo")
+    cfg = CONFIG.resolve()
+    print(f"\ncron (every 5 min):\n*/5 * * * * PERCH_CONFIG={cfg} {sys.executable} {Path(__file__).resolve()} tick")
+    print("or systemd: see docs/perch.service and docs/perch.timer")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(prog="perch")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -512,6 +561,7 @@ def main(argv=None):
         sub.add_parser(c).add_argument("agent")
     s = sub.add_parser("send"); s.add_argument("sender"); s.add_argument("to"); s.add_argument("message")
     sub.add_parser("inbox").add_argument("me")
+    sub.add_parser("init")
     s = sub.add_parser("serve"); s.add_argument("--port", type=int, default=8080)
     a = p.parse_args(argv)
 
@@ -521,6 +571,8 @@ def main(argv=None):
         for m in inbox(a.me):
             print(json.dumps(m))
         return
+    if a.cmd == "init":
+        return init()
     agents = load_agents()
     if a.cmd in ("start", "stop", "restart", "logs") and a.agent not in agents:
         sys.exit(f"unknown agent: {a.agent}")

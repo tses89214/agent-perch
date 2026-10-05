@@ -192,6 +192,36 @@ assert a.authed({"Tailscale-User-Login": "me@x"}) and not a.authed({"X-Token": "
 del os.environ["PERCH_TS_USER"]
 assert not a.authed({"Tailscale-User-Login": "me@x"})   # feature is off unless configured
 
+# container down alert: fires once on Up->Down transition, not for a container first seen down, never restarts anything
+calls = []
+a.alert = lambda fleet, msg: calls.append(msg)
+rows = {"v": "svc\tUp 1 hour\timg\t\nold\tExited (1) 2 days ago\timg\t\n"}
+fake = lambda *x, **k: type("R", (), {"stdout": rows["v"], "stderr": ""})()
+st, fl = {}, {"containers": ["*"]}
+a.check_containers(st, fl, fake); assert calls == []             # first sight: baseline only, "old" is not news
+rows["v"] = "svc\tExited (137) 1 minute ago\timg\t\nold\tExited (1) 2 days ago\timg\t\n"
+a.check_containers(st, fl, fake); a.check_containers(st, fl, fake)
+assert len(calls) == 1 and "svc" in calls[0]                      # once, then silent while it stays down
+rows["v"] = "svc\tUp 5 seconds\timg\t\nold\tExited (1) 2 days ago\timg\t\n"
+a.check_containers(st, fl, fake); rows["v"] = rows["v"].replace("Up 5 seconds", "Exited (1) now")
+a.check_containers(st, fl, fake); assert len(calls) == 2           # recovers then dies again = new alert
+
+calls.clear(); st2 = {}
+a.check_containers(st2, {"containers": ["*"], "containers_alert": ["nomatch*"]}, fake); rows["v"] = "svc\tExited (1) now\timg\t\n"
+a.check_containers(st2, {"containers": ["*"], "containers_alert": ["nomatch*"]}, fake); assert calls == []   # outside the alert subset: shown, never paged
+
+# cron log ages: stalest first, missing globs are fine
+d = a.HOME / "cl"; d.mkdir(exist_ok=True)
+for n, age in (("fresh.log", 10), ("stale.log", 5000)):
+    (d / n).write_text("x"); os.utime(d / n, (time.time() - age,) * 2)
+rows_ = a.cron_logs([str(d / "*.log"), "/nonexistent/*.log"])
+assert [r["name"] for r in rows_] == ["cl/stale.log", "cl/fresh.log"] and rows_[0]["age_s"] >= 5000
+assert a.cron_logs(None) == []
+
+# events: newest-last in the file, endpoint reverses; init refuses to clobber an existing config
+a.log_event("x", "hello"); assert a.recent_events(1)[0].endswith("x hello")
+a.CONFIG = a.HOME / "init.toml"; a.CONFIG.write_text("keep"); a.init(); assert a.CONFIG.read_text() == "keep"
+
 # lock: second holder is excluded while the first is inside
 import fcntl
 with a.locked():
