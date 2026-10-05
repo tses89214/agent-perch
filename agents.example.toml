@@ -1,4 +1,6 @@
 [agents.demo]
 cmd = "sh -c 'while true; do date; sleep 5; done'"
 cwd = "~"
-stuck_markers = ["Press Enter to continue"]
+stuck_markers = ["Press Enter to continue"]   # frozen = screen unchanged AND marker visible
+# health_cmd = "pgrep -f my-mcp-child"        # nonzero exit twice in a row -> restart
+# doorbell = true                             # opt in: type a fixed "check your mailbox" line when idle + unread

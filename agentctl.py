@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """agentctl: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
-import argparse, fcntl, hashlib, hmac, json, os, subprocess, sys, time, tomllib
+import argparse, contextlib, fcntl, hashlib, hmac, json, os, subprocess, sys, time, tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import unquote
@@ -64,6 +64,35 @@ def is_stuck(prev_hash, text, markers):
     return same and any(m in text for m in markers)
 
 
+HEALTH_FAILS = 2  # consecutive failures before restart: a fresh start needs a tick or two to come up
+
+
+def healthy(spec):
+    if "health_cmd" not in spec:
+        return True
+    try:
+        return subprocess.run(spec["health_cmd"], shell=True, timeout=10, capture_output=True,
+                              cwd=os.path.expanduser(spec.get("cwd", "~"))).returncode == 0
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def restart(name, spec, st, why):
+    stop(name)
+    start(name, spec)
+    log_event(name, f"restarted: {why}")
+    st["restarts"] += 1
+    st["hash"], st["health_fails"] = None, 0
+
+
+def ring_doorbell(name):
+    """Type ONE fixed line into the agent's session. Content never travels this way."""
+    cmd = f"Mailbox has new messages. Run: AGENT_FLEET_HOME={HOME} python3 {Path(__file__).resolve()} inbox {name}"
+    tmux("send-keys", "-t", session(name), "-l", cmd)
+    tmux("send-keys", "-t", session(name), "Enter")
+    log_event(name, "doorbell")
+
+
 def tick(agents, state, now=None):
     """One supervision pass (run from cron). Returns updated state."""
     now = now or time.time()
@@ -78,26 +107,42 @@ def tick(agents, state, now=None):
             continue
         text = pane(name)
         if is_stuck(st["hash"], text, spec.get("stuck_markers", [])):
-            stop(name)
-            start(name, spec)
-            log_event(name, "restarted: stuck")
-            st["restarts"] += 1
-            st["hash"] = None
+            restart(name, spec, st, "stuck")
             continue
-        st["hash"] = hashlib.sha1(text.encode()).hexdigest()
-        st["last_seen"] = now
+        st["health_fails"] = 0 if healthy(spec) else st.get("health_fails", 0) + 1
+        if st["health_fails"] >= HEALTH_FAILS:
+            restart(name, spec, st, "health_cmd failed")
+            continue
+        new_hash = hashlib.sha1(text.encode()).hexdigest()
+        idle = st["hash"] == new_hash  # screen static since last tick: not mid-turn
+        st["hash"], st["last_seen"] = new_hash, now
+        if spec.get("doorbell") and idle:
+            total, unread = mail(name)
+            if unread and st.get("rung") != total:  # once per new batch, not every tick
+                ring_doorbell(name)
+                st["rung"] = total
     return state
+
+
+@contextlib.contextmanager
+def locked():
+    """Serialise tick / CLI / dashboard: they all read-modify-write state.json."""
+    HOME.mkdir(parents=True, exist_ok=True)
+    with (HOME / ".lock").open("w") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield
 
 
 def control(cmd, name, agents):
     """start/stop/restart; `stopped` flag keeps tick from resurrecting an operator stop."""
-    state = load_state()
-    state.setdefault(name, {"restarts": 0, "last_seen": None, "hash": None})["stopped"] = cmd == "stop"
-    save_state(state)
-    if cmd != "start":
-        stop(name)
-    if cmd != "stop":
-        start(name, agents[name])
+    with locked():
+        state = load_state()
+        state.setdefault(name, {"restarts": 0, "last_seen": None, "hash": None})["stopped"] = cmd == "stop"
+        save_state(state)
+        if cmd != "start":
+            stop(name)
+        if cmd != "stop":
+            start(name, agents[name])
 
 
 def status(agents, state):
@@ -113,8 +158,8 @@ def send_msg(sender, to, message):
         f.write(line + "\n")
 
 
-def inbox(me):
-    """Unread messages for `me` (or 'all'); per-reader cursor file."""
+def mail(me):
+    """(total lines, unread messages for `me` or 'all') without moving the cursor."""
     cursor = HOME / f".cursor-{me}"
     seen = int(cursor.read_text()) if cursor.exists() else 0
     lines = []
@@ -122,9 +167,15 @@ def inbox(me):
         with MAILBOX.open() as f:
             fcntl.flock(f, fcntl.LOCK_SH)  # don't read a half-written line
             lines = f.read().splitlines()
-    cursor.write_text(str(len(lines)))
     msgs = [json.loads(l) for l in lines[seen:]]
-    return [m for m in msgs if m["to"] in (me, "all")]
+    return len(lines), [m for m in msgs if m["to"] in (me, "all")]
+
+
+def inbox(me):
+    """Unread messages; reading advances the per-reader cursor."""
+    total, msgs = mail(me)
+    (HOME / f".cursor-{me}").write_text(str(total))
+    return msgs
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>agent-fleet</title>
@@ -217,7 +268,8 @@ def main(argv=None):
         for r in status(agents, load_state()):
             print(f"{r['agent']:20} {'UP' if r['up'] else 'DOWN':5} restarts={r['restarts']}")
     elif a.cmd == "tick":
-        save_state(tick(agents, load_state()))
+        with locked():
+            save_state(tick(agents, load_state()))
     elif a.cmd in ("start", "stop", "restart"):
         control(a.cmd, a.agent, agents)
     elif a.cmd == "logs":
