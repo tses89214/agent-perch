@@ -428,7 +428,7 @@ function tab(t) {
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.t == t));
   try { localStorage.setItem('tab', t); } catch (e) {}
 }
-document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => tab(b.dataset.t));
+document.querySelectorAll('#tabs button').forEach((b) => b.onclick = () => { $('logclose').click(); tab(b.dataset.t); });  // an open log belongs to the tab it was opened from
 let tabInit = 'agents'; try { tabInit = localStorage.getItem('tab') || 'agents'; } catch (e) {}
 tab(tabInit);
 let watching = null, timer = null, chatOn = false, logBase = 'logs';
