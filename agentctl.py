@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """agentctl: supervise long-running agents in tmux. Stdlib only, Python 3.11+."""
-import argparse, fcntl, hashlib, json, os, subprocess, sys, time, tomllib
+import argparse, fcntl, hashlib, hmac, json, os, subprocess, sys, time, tomllib
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+from urllib.parse import unquote
 
 HOME = Path(os.environ.get("AGENT_FLEET_HOME", Path.home() / ".agent-fleet"))
 STATE, EVENTS, MAILBOX = HOME / "state.json", HOME / "events.log", HOME / "mailbox.jsonl"
@@ -88,6 +89,17 @@ def tick(agents, state, now=None):
     return state
 
 
+def control(cmd, name, agents):
+    """start/stop/restart; `stopped` flag keeps tick from resurrecting an operator stop."""
+    state = load_state()
+    state.setdefault(name, {"restarts": 0, "last_seen": None, "hash": None})["stopped"] = cmd == "stop"
+    save_state(state)
+    if cmd != "start":
+        stop(name)
+    if cmd != "stop":
+        start(name, agents[name])
+
+
 def status(agents, state):
     return [{"agent": n, "up": alive(n), "restarts": state.get(n, {}).get("restarts", 0),
              "last_seen": state.get(n, {}).get("last_seen")} for n in agents]
@@ -116,21 +128,65 @@ def inbox(me):
 
 
 PAGE = """<!doctype html><meta charset=utf-8><title>agent-fleet</title>
-<body style="font:14px monospace;margin:2rem"><h3>agent-fleet</h3><table id=t border=1 cellpadding=4></table>
-<script>fetch('status.json').then(r=>r.json()).then(d=>t.innerHTML='<tr><th>agent<th>up<th>restarts<th>last seen</tr>'+
-d.map(a=>`<tr><td>${a.agent}<td>${a.up?'UP':'DOWN'}<td>${a.restarts}<td>${a.last_seen?new Date(a.last_seen*1000).toLocaleString():'-'}</tr>`).join(''))</script>"""
+<body style="font:14px monospace;margin:2rem"><h3>agent-fleet</h3><table id=t border=1 cellpadding=4></table><pre id=log></pre>
+<script>
+let token = '';
+async function act(cmd, agent) {
+  if (!token) token = prompt('token') || '';
+  const r = await fetch(`do/${cmd}/${encodeURIComponent(agent)}`, {method: 'POST', headers: {'X-Token': token}});
+  if (r.status == 403) { token = ''; alert('bad token or control disabled'); }
+  load();
+}
+async function logs(agent) {
+  log.textContent = await (await fetch(`logs/${encodeURIComponent(agent)}`)).text();
+}
+async function load() {
+  const d = await (await fetch('status.json')).json();
+  t.replaceChildren();
+  const row = (cells) => { const tr = t.insertRow(); cells.forEach(c => tr.insertCell().append(c)); return tr; };
+  row(['agent', 'up', 'restarts', 'last seen', 'control']);
+  for (const a of d) {
+    const btns = document.createElement('span');
+    for (const c of ['start', 'stop', 'restart']) {
+      const b = document.createElement('button'); b.textContent = c; b.onclick = () => act(c, a.agent); btns.append(b);
+    }
+    const lb = document.createElement('button'); lb.textContent = 'logs'; lb.onclick = () => logs(a.agent); btns.append(lb);
+    row([a.agent, a.up ? 'UP' : 'DOWN', String(a.restarts), a.last_seen ? new Date(a.last_seen * 1000).toLocaleString() : '-', btns]);
+  }
+}
+load(); setInterval(load, 10000);
+</script>"""
 
 
-class Dash(BaseHTTPRequestHandler):  # read-only: no POST handler, nothing mutates
-    def do_GET(self):
-        if self.path == "/status.json":
-            body, ctype = json.dumps(status(load_agents(), load_state())).encode(), "application/json"
-        else:
-            body, ctype = PAGE.encode(), "text/html"
-        self.send_response(200)
+class Dash(BaseHTTPRequestHandler):
+    """GET is read-only. POST /do/<start|stop|restart>/<agent> needs X-Token == $AGENT_FLEET_TOKEN;
+    with the env var unset, control is disabled entirely."""
+
+    def reply(self, code, body, ctype="text/plain"):
+        self.send_response(code)
         self.send_header("Content-Type", ctype)
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(body.encode())
+
+    def do_GET(self):
+        if self.path == "/status.json":
+            self.reply(200, json.dumps(status(load_agents(), load_state())), "application/json")
+        elif self.path.startswith("/logs/"):
+            name = unquote(self.path[6:])
+            self.reply(200, pane(name) if name in load_agents() and alive(name) else "(not running)")
+        else:
+            self.reply(200, PAGE, "text/html")
+
+    def do_POST(self):
+        token = os.environ.get("AGENT_FLEET_TOKEN", "")
+        if not token or not hmac.compare_digest(self.headers.get("X-Token", ""), token):
+            return self.reply(403, "forbidden")
+        parts = self.path.split("/")  # ['', 'do', cmd, agent]
+        agents = load_agents()
+        if len(parts) != 4 or parts[1] != "do" or parts[2] not in ("start", "stop", "restart") or unquote(parts[3]) not in agents:
+            return self.reply(404, "not found")
+        control(parts[2], unquote(parts[3]), agents)
+        self.reply(200, "ok")
 
     def log_message(self, *a):
         pass
@@ -163,13 +219,7 @@ def main(argv=None):
     elif a.cmd == "tick":
         save_state(tick(agents, load_state()))
     elif a.cmd in ("start", "stop", "restart"):
-        state = load_state()
-        state.setdefault(a.agent, {"restarts": 0, "last_seen": None, "hash": None})["stopped"] = a.cmd == "stop"
-        save_state(state)
-        if a.cmd != "start":
-            stop(a.agent)
-        if a.cmd != "stop":
-            start(a.agent, agents[a.agent])
+        control(a.cmd, a.agent, agents)
     elif a.cmd == "logs":
         print(pane(a.agent))
     elif a.cmd == "serve":

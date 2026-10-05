@@ -15,7 +15,7 @@ cp agents.example.toml agents.toml     # declare agents
 python3 agentctl.py tick               # run from cron every minute
 python3 agentctl.py ls | start | stop | restart | logs <agent>
 python3 agentctl.py send <from> <to|all> "msg"; python3 agentctl.py inbox <me>
-python3 agentctl.py serve --port 8080  # read-only dashboard
+AGENT_FLEET_TOKEN=secret python3 agentctl.py serve --port 8080  # dashboard; without the token it is read-only
 python3 test_agentctl.py               # needs tmux
 ```
 
@@ -25,7 +25,7 @@ python3 test_agentctl.py               # needs tmux
 - **tmux as the process boundary.** Sessions survive supervisor crashes, and you can attach to see exactly what an agent sees. Cost: liveness is "session exists", not "work is progressing".
 - **Mailbox is a file, not keystroke injection.** Typing into another agent's terminal corrupts whatever it is mid-way through. A jsonl append (flock) with per-reader cursors is boring and inspectable. Cost: agents must poll; no push.
 - **Stateless supervisor.** `tick` is a one-shot cron job reading `state.json`; no daemon to supervise the supervisor.
-- **Dashboard is read-only and binds localhost.** No mutating endpoints exist, so there is nothing to authenticate. Put a reverse proxy in front if you need remote access.
+- **Dashboard control is off unless `AGENT_FLEET_TOKEN` is set, and binds localhost.** Start/stop/restart/logs buttons; POSTs need the token (constant-time compare), unknown agents 404. Plain HTTP, so use a TLS reverse proxy for remote access; token is a shared secret, not per-user auth.
 
 ## Limits (deliberate)
 
