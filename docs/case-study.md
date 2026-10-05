@@ -21,7 +21,7 @@ About ten long-running Claude Code agents, each in its own tmux session, each re
 | Session alive, screen normal, no messages arrive | the agent's channel subprocess died and the harness never respawned it (known upstream issue) | process-tree check (now `health_cmd`) |
 | Same dialog after every restart | a harness confirmation prompt, not a model state | answer it with its own default key (now `auto_replies`) |
 | Messages stop arriving, every local process healthy | outside path broke: nginx redirect, router port forward, dynamic-DNS record | external check that alerts through an independent bot, because restarting an agent cannot fix it. Environment-specific, so not in the tool |
-| Unexplained reboot | power or thermal | boot-time alert that includes the Pi's under-voltage and throttling flags, since the journal does not survive a reboot |
+| Unexplained reboot | power or thermal | boot-time alert that includes the Pi's under-voltage and throttling flags, since the system journal was volatile-only at the time and the cause often could not be reconstructed afterwards |
 
 ## What was deliberately not generalised
 
