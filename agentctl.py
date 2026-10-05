@@ -143,7 +143,9 @@ def main(argv=None):
     if a.cmd == "send":
         return send_msg(a.sender, a.to, a.message)
     if a.cmd == "inbox":
-        return [print(json.dumps(m)) for m in inbox(a.me)] and None
+        for m in inbox(a.me):
+            print(json.dumps(m))
+        return
     agents = load_agents()
     if a.cmd in ("start", "stop", "restart", "logs") and a.agent not in agents:
         sys.exit(f"unknown agent: {a.agent}")
