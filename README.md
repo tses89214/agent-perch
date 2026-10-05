@@ -16,7 +16,7 @@ python3 perch.py tick               # run from cron every minute
 python3 perch.py ls | start | stop | restart | logs <agent>
 python3 perch.py send <from> <to|all> "msg"; python3 perch.py inbox <me>
 PERCH_TOKEN=secret python3 perch.py serve --port 8080  # dashboard; without the token it is read-only
-python3 test_perch.py               # needs tmux
+python3 test_perch.py               # or pytest; needs tmux
 ```
 
 ![dashboard](docs/dashboard.png)
@@ -56,7 +56,7 @@ Alert destinations (Telegram, Slack, mail) are whatever your `notify_cmd` does w
 
 ## Exposing the dashboard
 
-It binds 127.0.0.1 only. To reach it from other devices, put it behind something that authenticates the *network* (e.g. `tailscale serve`, which is tailnet-only with TLS). With `PERCH_TS_USER` set, requests carrying that Tailscale login skip the token (the header is only trustworthy behind `tailscale serve`; local processes can forge it, but they could read the token file anyway). `PERCH_TOKEN` is a single shared secret, enough for that, not for the public internet: don't expose it there. With the token set, logs, start/stop/restart and chat all require it; `/status.json` stays readable. Optional `[fleet] containers = ["name-glob*"]` adds a read-only Containers tab (status, image, ports, last 200 log lines; only matching names ever reach `docker`). The dashboard has Agents / Containers / Events / System tabs. `containers_alert` (optional, defaults to `containers`) pages once when a matching container goes Up to not-Up (observe only, never restarts). `cron_logs = ["~/path/*.log"]` lists log freshness on the System tab, stalest first; it has no notion of each job's expected interval, so you judge what is stale. `perch init` writes a starter config and prints a cron line; systemd examples are in `docs/`.
+It binds 127.0.0.1 only. To reach it from other devices, put it behind something that authenticates the *network* (e.g. `tailscale serve`, which is tailnet-only with TLS). With `PERCH_TS_USER` set, requests carrying that Tailscale login skip the token (the header is only trustworthy behind `tailscale serve`; local processes can forge it, but they could read the token file anyway). `PERCH_TOKEN` is a single shared secret, enough for that, not for the public internet: don't expose it there. With the token set, status, logs, events, start/stop/restart and chat all require it (the page itself is static and asks for the token when status is refused). Optional `[fleet] containers = ["name-glob*"]` adds a read-only Containers tab (status, image, ports, last 200 log lines; only matching names ever reach `docker`). The dashboard has Agents / Containers / Events / System tabs. `containers_alert` (optional, defaults to `containers`) pages once when a matching container goes Up to not-Up (observe only, never restarts). `cron_logs = ["~/path/*.log"]` lists log freshness on the System tab, stalest first; it has no notion of each job's expected interval, so you judge what is stale. `perch init` writes a starter config and prints a cron line; systemd examples are in `docs/`.
 
 ## Limits (deliberate)
 

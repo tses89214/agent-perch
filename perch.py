@@ -455,12 +455,14 @@ $('chat').onsubmit = async (e) => {
   if (r.status == 403) alert(await r.text()); else { $('msg').value = ''; setTimeout(refreshLog, 800); }
 };
 async function load() {
-  const j = await (await fetch('status.json')).json(), d = j.agents;
+  const r = await fetch('status.json', {headers: {'X-Token': token}});
+  if (r.status == 403) { $('stamp').textContent = 'locked - click to enter token'; $('stamp').style.cursor = 'pointer'; $('stamp').onclick = async () => { token = prompt('token') || ''; load(); }; return; }
+  const j = await r.json(), d = j.agents;
   $('disk').textContent = j.system.disk_pct + '%'; $('diskbar').style.width = j.system.disk_pct + '%';
   $('diskbar').style.background = j.system.disk_pct >= 90 ? 'var(--down)' : j.system.disk_pct >= 80 ? 'var(--halt)' : 'var(--up)';
   $('mem').textContent = j.system.mem_avail_mb + ' MB';
   $('upcount').textContent = d.filter((a) => a.up && !a.halted).length + ' / ' + d.length;
-  $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString();
+  $('stamp').textContent = 'updated ' + new Date().toLocaleTimeString(); $('stamp').style.cursor = '';
   $('cronlabel').style.display = $('cronlogs').style.display = j.cron_logs.length ? 'block' : 'none';
   $('cronlogs').replaceChildren(...j.cron_logs.map((c) => { const row = el('div', 'meta'); row.append(el('span', '', c.name), el('span', '', ago(Date.now() / 1000 - c.age_s))); return row; }));
   $('noct').style.display = j.containers.length ? 'none' : 'block';
@@ -496,7 +498,7 @@ def authed(headers):
 
 
 class Dash(BaseHTTPRequestHandler):
-    """GET is read-only (except /logs/<agent>, which needs the token when one is set). POST /do/<start|stop|restart>/<agent> and POST /send/<agent> (body = one line of text,
+    """GET is read-only (status, logs and events need the token / Tailscale login when either is configured). POST /do/<start|stop|restart>/<agent> and POST /send/<agent> (body = one line of text,
     agents with `chat = true` only) need X-Token == $PERCH_TOKEN; with the env var unset, control is disabled entirely."""
 
     def reply(self, code, body, ctype="text/plain"):
@@ -506,12 +508,13 @@ class Dash(BaseHTTPRequestHandler):
         self.wfile.write(body.encode())
 
     def do_GET(self):
+        # panes, events and status can hold anything an agent printed: gated whenever any auth is configured
+        if self.path.startswith(("/status.json", "/logs/", "/clogs/", "/events")) and \
+                (os.environ.get("PERCH_TOKEN") or os.environ.get("PERCH_TS_USER")) and not authed(self.headers):
+            return self.reply(403, "token required")
         if self.path == "/status.json":
             self.reply(200, json.dumps(status(load_agents(), load_state(), load_fleet())), "application/json")
         elif self.path.startswith(("/logs/", "/clogs/", "/events")):
-            # a pane can hold anything the agent printed: gated whenever any auth is configured
-            if (os.environ.get("PERCH_TOKEN") or os.environ.get("PERCH_TS_USER")) and not authed(self.headers):
-                return self.reply(403, "token required")
             if self.path == "/events":
                 return self.reply(200, "\n".join(reversed(recent_events())) or "(no events)")
             name = unquote(self.path.split("/", 2)[2])
