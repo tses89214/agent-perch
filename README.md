@@ -1,5 +1,7 @@
 # agent-perch
 
+[English](README.md) | [繁體中文](README.zh-TW.md)
+
 Keep a fleet of long-running agent processes (e.g. Claude Code bots) alive on one machine. One file, stdlib only, Python 3.11+.
 
 ![architecture](docs/architecture.svg)
@@ -20,6 +22,26 @@ python3 test_perch.py               # or pytest; needs tmux
 ```
 
 ![dashboard](docs/dashboard.png)
+
+## Quick start for Claude Code
+
+Each Claude Code instance becomes one agent in `agents.toml`. The two `auto_replies` and the markers below are the ones a real always-on fleet needed; adjust the strings to your Claude Code version.
+
+```toml
+[agents.myproject]
+cmd = "claude --model sonnet"
+cwd = "~/myproject"
+auto_replies = [{ match = "Resume from summary", keys = ["Enter"] }]   # harness dialog: answer it, a restart would just show it again
+restart_markers = ["Enter to select", "Esc to cancel"]                 # stuck on a menu nobody can answer -> restart
+notice_regex = "hit.*limit|resets at|Approaching.*limit"               # usage-limit banner: alert only, never restart
+```
+
+```
+python3 perch.py tick     # cron: * * * * *  (cd to the repo dir first, or set PERCH_CONFIG)
+tmux attach -t perch_myproject
+```
+
+What it catches: the tmux session died, the agent froze on a keypress prompt, a confirmation dialog reappears after every restart, a usage-limit banner appeared, an MCP/channel child process died while the screen still looks fine (`health_cmd`).
 
 ## Configure
 
