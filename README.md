@@ -2,7 +2,14 @@
 
 [English](README.md) | [繁體中文](README.zh-TW.md)
 
-Keep a fleet of long-running agent processes (e.g. Claude Code bots) alive on one machine. One file, stdlib only, Python 3.11+.
+A small supervisor that keeps long-running AI agent processes (e.g. Claude Code bots) alive on one machine. One Python file (about 600 lines), standard library only, Python 3.11+.
+
+**What it does**
+- Restarts agents whose tmux session died, and detects agents frozen on a prompt nobody can answer.
+- Answers known harness dialogs automatically, and halts crash loops (3 restarts in 10 minutes) with an alert instead of restarting forever.
+- Gives agents a file-based mailbox to message each other, plus a small web dashboard (read-only unless you set a token).
+
+**What makes it different:** every design decision below states its trade-off, and the limits are stated explicitly. It was extracted from a watchdog that ran a live Raspberry Pi agent fleet.
 
 ![architecture](docs/architecture.svg)
 
