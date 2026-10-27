@@ -2,7 +2,14 @@
 
 [English](README.md) | 繁體中文
 
-讓一台機器上一群長時間運行的 agent 行程（例如 Claude Code bot）保持存活。單一檔案、只用標準函式庫、Python 3.11+。
+一個小型 supervisor，讓一台機器上長時間運行的 AI agent 行程（例如 Claude Code bot）保持存活。單一 Python 檔案（約 600 行）、只用標準函式庫、Python 3.11+。
+
+**它做什麼**
+- tmux session 死掉就重啟，並偵測 agent 卡在沒人能回應的提示。
+- 自動回應已知的 harness 對話框；crash loop（10 分鐘內重啟 3 次）會停下來並發出警報，而不是無限重啟。
+- 提供檔案式信箱讓 agent 互傳訊息，以及一個小型網頁儀表板（沒設 token 時唯讀）。
+
+**特色：** 下面每個設計決策都寫明取捨，限制也明確寫出來。它是從一個實際跑在樹莓派 agent 群上的 watchdog 抽出來的。
 
 ![architecture](docs/architecture.svg)
 
